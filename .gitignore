@@ -1,8 +1,18 @@
 # Python 环境
-.env/
+# 注意：.env 是文件，不能写成 .env/，否则会被 git 追踪并泄露 API key
+.env
 .venv/
 __pycache__/
+
+# 测试与覆盖率产物
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
 
 # 忽略的文件
 workspace/
 data/
+
+# 个人文件（仅本地保留，不提交）
+/sample.md
