@@ -1,0 +1,8 @@
+# Python 环境
+.env/
+.venv/
+__pycache__/
+
+# 忽略的文件
+workspace/
+data/
