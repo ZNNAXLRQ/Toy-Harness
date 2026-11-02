@@ -1,0 +1,1 @@
+# 移植说明：Agent、Provider 和提示词分别从 Nano Codex 拆出，不依赖作业目录。

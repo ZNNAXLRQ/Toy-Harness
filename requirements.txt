@@ -1,0 +1,4 @@
+# 来源：D:/Programs/Python/OOAD/Assignment1/requirements.txt；仅声明已验证的 Provider 依赖。
+# 后续：由依赖负责人统一加入 Web/持久化所需依赖，不以此替代最终项目依赖清单。
+openai==2.54.0
+python-dotenv==1.2.4

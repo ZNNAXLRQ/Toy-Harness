@@ -3,6 +3,9 @@
 .venv/
 __pycache__/
 
+# Agent配置
+.env
+
 # 忽略的文件
 workspace/
 data/
