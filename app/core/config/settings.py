@@ -2,19 +2,23 @@
 
 优先级（高 → 低）：显式传参 > ``HARNESS_*`` 环境变量 > ``.env`` > ``config.yaml`` > 代码默认值。
 
-两条刻意的设计：
+**配置的基本单位是 provider profile，不是单个字段。** 切换厂商只改 ``llm.active``
+一个字段；密钥、端点、模型都绑在同一条 profile 里，因此不存在「provider 换了、
+base_url / api_key 还留在上一家」的中间态：
 
-1. **空文件可用**。C/D 尚未填 ``config.yaml`` 时也必须能起服务，所以每个字段都有
-   默认值，缺文件、空文件、缺字段都不会炸；真缺到不可用的程度由使用方抛
-   ``ConfigError``（例如没有 API key）。
-2. **不发明环境变量名**。密钥沿用厂商官方的 ``OPENAI_API_KEY`` /
-   ``DEEPSEEK_API_KEY`` / ``ANTHROPIC_API_KEY``，与 ``llm.provider`` 一一对应；
-   yaml 里写成 ``${DEEPSEEK_API_KEY}`` 占位符时，在这里解析成真实值。
-   占位符与 provider 不一致属于配置错误（``ConfigError``），不做「尽力猜测」——
-   否则切换厂商后会把上一家的密钥发给新的服务。
+    llm:
+      active: deepseek
+      providers:
+        deepseek: { adapter: deepseek, api_key: ${DEEPSEEK_API_KEY} }
+        gateway:  { adapter: openai, base_url: https://my-gw/v1, api_key: ${GW_KEY} }
+
+分工：厂商默认域名、环境变量名这类事实属于**代码**（各适配器）；配置文件只声明
+「用哪套、钥匙在哪、要不要覆盖端点」。``providers`` 在 yaml 里出现即整段替换代码
+默认值（pydantic 不做深合并），避免"我看着改了一条、其实还在用默认值"。
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -33,13 +37,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
 ENV_FILE = PROJECT_ROOT / ".env"
 
-ProviderName = Literal["deepseek", "openai", "claude"]
+AdapterName = Literal["deepseek", "openai", "claude"]
 
-PROVIDER_ENV_KEYS: dict[str, str] = {
+# 适配器名 → 厂商官方环境变量名。事实属于代码，不写进配置文件。
+ADAPTER_ENV_KEYS: dict[str, str] = {
     "deepseek": "DEEPSEEK_API_KEY",
     "openai": "OPENAI_API_KEY",
     "claude": "ANTHROPIC_API_KEY",
 }
+KNOWN_VENDOR_VARS = frozenset(ADAPTER_ENV_KEYS.values())
 
 
 class ServerSettings(BaseModel):
@@ -50,23 +56,53 @@ class DatabaseSettings(BaseModel):
     path: str = "./data/harness.db"
 
 
-class LLMSettings(BaseModel):
-    provider: ProviderName = "deepseek"
+class ProviderProfile(BaseModel):
+    """一条完整的 provider 配置。预设与自定义是同一个形状，只差填不填 optional 字段。"""
+
+    adapter: AdapterName = "deepseek"
+    """协议形状，决定用哪个适配器、以及缺省域名取哪家的。"""
+
     api_key: str | None = None
-    """可以写字面值、``${VAR}`` 占位符，或留空以便从厂商环境变量读取。"""
+    """字面值、``${VAR}`` 占位符，或留空以使用适配器对应的厂商环境变量。"""
 
     base_url: str | None = None
-    """留空时由具体适配器提供默认值（DeepSeek/OpenAI 走兼容接口，Claude 无自定义）。"""
+    """留空表示用适配器的默认域名；填写则覆盖（自建网关、OpenRouter、vLLM 等）。"""
 
     model: str | None = None
-    """留空时由适配器选择默认模型，配置文件不该硬编码模型版本。"""
+    """留空由适配器选择默认模型，配置文件不硬编码模型版本。"""
 
     timeout_seconds: float = 60.0
     max_retries: int = 0
 
 
+def _default_profiles() -> dict[str, ProviderProfile]:
+    """三家预设；``config.yaml`` 未写 ``providers`` 时生效。"""
+    return {name: ProviderProfile(adapter=name) for name in ADAPTER_ENV_KEYS}
+
+
+class LLMSettings(BaseModel):
+    active: str = "deepseek"
+    providers: dict[str, ProviderProfile] = Field(default_factory=_default_profiles)
+
+
 class LoggingSettings(BaseModel):
     level: str = "INFO"
+
+
+@dataclass(frozen=True)
+class ResolvedProvider:
+    """补齐默认值之后、可以直接交给工厂的东西。
+
+    ``base_url`` 为 ``None`` 表示"用适配器默认域名"，由适配器决定而不是配置层猜。
+    """
+
+    name: str
+    adapter: str
+    api_key: str
+    base_url: str | None
+    model: str | None
+    timeout_seconds: float
+    max_retries: int
 
 
 class HarnessSettings(BaseSettings):
@@ -101,29 +137,61 @@ class HarnessSettings(BaseSettings):
             file_secret_settings,
         )
 
-    @property
-    def resolved_api_key(self) -> str | None:
-        """按 provider 解析出真实密钥；没有则 ``None``（由容器决定是否报错）。
+    def resolve_provider(self) -> ResolvedProvider:
+        """把 ``llm.active`` 指向的 profile 解析成可直接使用的配置。
 
-        占位符必须指向**当前 provider** 对应的变量：``provider`` 被
-        ``HARNESS_LLM__PROVIDER`` 之类的覆盖切到另一家、而 yaml 里还留着上一家的
-        ``${DEEPSEEK_API_KEY}`` 时，直接把那个密钥交给新适配器就是把凭据发给错误的
-        服务。这种情况视为配置错误，抛 ``ConfigError`` 而不是「尽力解析」。
+        失败一律抛 ``ConfigError``（不是 pydantic 的 ValidationError），因为这是
+        部署配置问题，Web 层要能映射成一个可读的错误而不是 500 堆栈。
         """
-        raw = (self.llm.api_key or "").strip()
-        expected = PROVIDER_ENV_KEYS[self.llm.provider]
-        if raw.startswith("${") and raw.endswith("}"):
-            name = raw[2:-1].strip()
-            if name != expected:
-                raise ConfigError(
-                    f"llm.api_key 指向 {name}，但 llm.provider 是 {self.llm.provider}；"
-                    f"切换厂商时必须一起改占位符（应为 {expected}）",
-                    detail={"provider": self.llm.provider, "placeholder": name, "expected": expected},
-                )
-            return os.environ.get(name) or None
-        if raw:
-            return raw
-        return os.environ.get(expected) or None
+        name = self.llm.active
+        profile = self.llm.providers.get(name)
+        if profile is None:
+            raise ConfigError(
+                f"llm.active = {name!r} 没有对应的 profile；"
+                f"可选：{sorted(self.llm.providers)}",
+                detail={"active": name, "available": sorted(self.llm.providers)},
+            )
+
+        api_key = _resolve_api_key(profile, name)
+        if not api_key:
+            raise ConfigError(
+                f"provider {name!r}（adapter={profile.adapter}）没有可用密钥；"
+                f"请在 profile 里填 api_key，或设置环境变量 {ADAPTER_ENV_KEYS[profile.adapter]}",
+                detail={"provider": name, "adapter": profile.adapter},
+            )
+
+        return ResolvedProvider(
+            name=name,
+            adapter=profile.adapter,
+            api_key=api_key,
+            base_url=profile.base_url,
+            model=profile.model,
+            timeout_seconds=profile.timeout_seconds,
+            max_retries=profile.max_retries,
+        )
+
+
+def _resolve_api_key(profile: ProviderProfile, name: str) -> str | None:
+    """解析成真实密钥。
+
+    占位符允许指向任意变量（自定义网关用 ``${GW_KEY}`` 是合法的），但如果它指的
+    是**另一家厂商的官方变量**（``${OPENAI_API_KEY}`` 却挂在 deepseek 上），那基本
+    是从示例配置里抄错了行，直接报错；配置串味在 profile 模型里本就不可能发生。
+    """
+    raw = (profile.api_key or "").strip()
+    expected = ADAPTER_ENV_KEYS[profile.adapter]
+    if raw.startswith("${") and raw.endswith("}"):
+        variable = raw[2:-1].strip()
+        if variable in KNOWN_VENDOR_VARS and variable != expected:
+            raise ConfigError(
+                f"profile {name!r}（adapter={profile.adapter}）的 api_key 指向 {variable}，"
+                f"这属于另一家厂商；应使用 {expected}（或自定义变量名）",
+                detail={"provider": name, "adapter": profile.adapter, "placeholder": variable},
+            )
+        return os.environ.get(variable) or None
+    if raw:
+        return raw
+    return os.environ.get(expected) or None
 
 
 def load_env(path: Path = ENV_FILE) -> None:

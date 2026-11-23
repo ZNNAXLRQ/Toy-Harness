@@ -1,4 +1,4 @@
-"""配置读取的契约：空文件可用、yaml 是基线、环境变量覆盖、密钥按 provider 解析。"""
+"""配置读取的契约：空文件可用、yaml 是基线、环境变量覆盖、provider 是成套切换的。"""
 
 import pytest
 
@@ -14,9 +14,19 @@ database:
   path: ./data/custom.db
 
 llm:
-  provider: deepseek
-  api_key: ${DEEPSEEK_API_KEY}
-  base_url: https://api.deepseek.com
+  active: deepseek
+  providers:
+    deepseek:
+      adapter: deepseek
+      api_key: ${DEEPSEEK_API_KEY}
+      base_url: https://api.deepseek.com
+    gateway:
+      adapter: openai
+      api_key: ${GW_KEY}
+      base_url: https://my-gw/v1
+      model: qwen-max
+      timeout_seconds: 30
+      max_retries: 2
 
 logging:
   level: DEBUG
@@ -30,12 +40,19 @@ def config_file(monkeypatch, tmp_path):
     return path
 
 
+@pytest.fixture
+def sample_config(config_file):
+    config_file.write_text(SAMPLE_YAML, encoding="utf-8")
+    return config_file
+
+
 def test_missing_config_file_uses_defaults(config_file):
     settings = HarnessSettings()
 
     assert settings.server.port == 8080
     assert settings.database.path == "./data/harness.db"
-    assert settings.llm.provider == "deepseek"
+    assert settings.llm.active == "deepseek"
+    assert set(settings.llm.providers) == {"deepseek", "openai", "claude"}
     assert settings.logging.level == "INFO"
 
 
@@ -43,79 +60,115 @@ def test_empty_config_file_uses_defaults(config_file):
     """C/D 尚未填 config.yaml 时服务也必须能起。"""
     config_file.write_text("", encoding="utf-8")
 
-    assert HarnessSettings().server.port == 8080
+    assert HarnessSettings().llm.active == "deepseek"
 
 
-def test_yaml_provides_the_baseline(config_file):
-    config_file.write_text(SAMPLE_YAML, encoding="utf-8")
+def test_yaml_provides_the_baseline(sample_config):
     settings = HarnessSettings()
 
     assert settings.server.port == 9000
     assert settings.database.path == "./data/custom.db"
     assert settings.logging.level == "DEBUG"
+    assert set(settings.llm.providers) == {"deepseek", "gateway"}  # yaml 写 providers 即整段替换
 
 
-def test_env_overrides_yaml(config_file, monkeypatch):
-    config_file.write_text(SAMPLE_YAML, encoding="utf-8")
-    monkeypatch.setenv("HARNESS_SERVER__PORT", "9999")
-    monkeypatch.setenv("HARNESS_LLM__PROVIDER", "openai")
+def test_switching_active_switches_the_whole_profile(sample_config, monkeypatch):
+    """换 provider 只动一个字段：密钥、端点、模型一起换，不存在换了一半。"""
+    monkeypatch.setenv("HARNESS_LLM__ACTIVE", "gateway")
+    monkeypatch.setenv("GW_KEY", "sk-gateway")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
 
-    settings = HarnessSettings()
+    resolved = HarnessSettings().resolve_provider()
 
-    assert settings.server.port == 9999
-    assert settings.llm.provider == "openai"
-
-
-def test_placeholder_api_key_is_resolved_from_env(config_file, monkeypatch):
-    config_file.write_text(SAMPLE_YAML, encoding="utf-8")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-
-    assert HarnessSettings().resolved_api_key == "sk-test"
-
-
-def test_api_key_falls_back_to_provider_env_var(config_file, monkeypatch):
-    config_file.write_text("llm:\n  provider: openai\n", encoding="utf-8")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
-
-    assert HarnessSettings().resolved_api_key == "sk-openai"
+    assert resolved.name == "gateway"
+    assert resolved.adapter == "openai"
+    assert resolved.api_key == "sk-gateway"
+    assert resolved.base_url == "https://my-gw/v1"
+    assert resolved.model == "qwen-max"
+    assert resolved.timeout_seconds == 30
+    assert resolved.max_retries == 2
 
 
-def test_literal_api_key_wins_over_env(config_file, monkeypatch):
-    config_file.write_text("llm:\n  provider: deepseek\n  api_key: literal-key\n", encoding="utf-8")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "from-env")
+def test_preset_profile_keeps_its_own_key(sample_config, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    monkeypatch.setenv("GW_KEY", "sk-gateway")
 
-    assert HarnessSettings().resolved_api_key == "literal-key"
+    resolved = HarnessSettings().resolve_provider()
 
-
-def test_missing_key_returns_none_instead_of_raising(config_file, monkeypatch):
-    """是否「必须有 key」由容器决定，配置层不替实现层做策略。"""
-    config_file.write_text("", encoding="utf-8")
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-
-    assert HarnessSettings().resolved_api_key is None
+    assert resolved.name == "deepseek"
+    assert resolved.adapter == "deepseek"
+    assert resolved.api_key == "sk-deepseek"
+    assert resolved.base_url == "https://api.deepseek.com"
 
 
-def test_placeholder_from_another_provider_is_rejected(config_file, monkeypatch):
-    """切换厂商后不能把上一家的密钥发给新服务。"""
+def test_placeholder_naming_another_vendor_is_rejected(config_file, monkeypatch):
+    """把 openai 的变量名抄到 deepseek profile 上：报错，不静默取用。"""
     config_file.write_text(
-        "llm:\n  provider: deepseek\n  api_key: ${DEEPSEEK_API_KEY}\n", encoding="utf-8"
+        "llm:\n  active: deepseek\n  providers:\n"
+        "    deepseek:\n      adapter: deepseek\n      api_key: ${OPENAI_API_KEY}\n",
+        encoding="utf-8",
     )
-    monkeypatch.setenv("HARNESS_LLM__PROVIDER", "openai")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake-deepseek")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
 
     with pytest.raises(ConfigError):
-        HarnessSettings().resolved_api_key
+        HarnessSettings().resolve_provider()
 
 
-def test_switching_provider_uses_that_providers_key(config_file, monkeypatch):
-    """留空 api_key 时，密钥跟着 provider 走。"""
-    config_file.write_text("llm:\n  provider: deepseek\n", encoding="utf-8")
-    monkeypatch.setenv("HARNESS_LLM__PROVIDER", "openai")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+def test_custom_profile_may_use_its_own_env_var(sample_config, monkeypatch):
+    """自定义网关的密钥变量名是自由的，不该被厂商变量名限制。"""
+    monkeypatch.setenv("HARNESS_LLM__ACTIVE", "gateway")
+    monkeypatch.setenv("GW_KEY", "sk-custom")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    settings = HarnessSettings()
+    assert HarnessSettings().resolve_provider().api_key == "sk-custom"
 
-    assert settings.llm.provider == "openai"
-    assert settings.resolved_api_key == "sk-openai"
+
+def test_literal_api_key_is_used_as_is(config_file, monkeypatch):
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n"
+        "    local:\n      adapter: openai\n      api_key: literal-key\n"
+        "      base_url: http://localhost:8000/v1\n",
+        encoding="utf-8",
+    )
+
+    resolved = HarnessSettings().resolve_provider()
+
+    assert resolved.api_key == "literal-key"
+    assert resolved.base_url == "http://localhost:8000/v1"
+
+
+def test_missing_api_key_raises_with_actionable_message(config_file, monkeypatch):
+    config_file.write_text(
+        "llm:\n  active: deepseek\n  providers:\n    deepseek:\n      adapter: deepseek\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    with pytest.raises(ConfigError) as caught:
+        HarnessSettings().resolve_provider()
+
+    assert "DEEPSEEK_API_KEY" in caught.value.message
+
+
+def test_unknown_active_profile_raises(config_file):
+    config_file.write_text("llm:\n  active: nope\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as caught:
+        HarnessSettings().resolve_provider()
+
+    assert "nope" in caught.value.message
+    assert "deepseek" in caught.value.message  # 给出可选值
+
+
+def test_profile_defaults_apply_when_not_overridden(config_file):
+    config_file.write_text(
+        "llm:\n  active: deepseek\n  providers:\n    deepseek:\n      api_key: k\n",
+        encoding="utf-8",
+    )
+
+    resolved = HarnessSettings().resolve_provider()
+
+    assert resolved.adapter == "deepseek"
+    assert resolved.base_url is None  # 留给适配器的默认域名
+    assert resolved.timeout_seconds == 60.0
+    assert resolved.max_retries == 0
