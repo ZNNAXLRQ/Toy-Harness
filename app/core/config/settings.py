@@ -49,11 +49,43 @@ KNOWN_VENDOR_VARS = frozenset(ADAPTER_ENV_KEYS.values())
 
 
 class ServerSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     port: int = Field(default=8080, ge=1, le=65535)
 
 
 class DatabaseSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     path: str = "./data/harness.db"
+
+    @field_validator("path")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("database.path must not be empty")
+        return value
+
+
+class WorkspaceSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = "./workspace"
+    """工具的工作区根目录；相对路径按项目根解析（与 database.path 一致）。"""
+
+
+class AgentSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_iterations: int = Field(default=15, ge=1)
+    token_budget: int = Field(default=32000, ge=1024)
+
+
+class SubagentSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_concurrency: int = Field(default=2, ge=1)
+    max_depth: int = Field(default=2, ge=1)
 
 
 class ProviderProfile(BaseModel):
@@ -100,12 +132,24 @@ def _default_profiles() -> dict[str, ProviderProfile]:
 
 
 class LLMSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     active: str = "deepseek"
     providers: dict[str, ProviderProfile] = Field(default_factory=_default_profiles)
 
 
 class LoggingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     level: str = "INFO"
+
+    @field_validator("level")
+    @classmethod
+    def _known_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(f"unknown logging level: {value!r}")
+        return normalized
 
 
 @dataclass(frozen=True)
@@ -134,12 +178,17 @@ class HarnessSettings(BaseSettings):
         # 必须显式指定：默认按本地编码读 yaml，中文 Windows 上是 GBK，
         # 配置文件里只要有一行中文注释就会 UnicodeDecodeError。
         yaml_file_encoding="utf-8",
-        extra="ignore",
+        # 拼错的顶层键必须报错：``llm.activ: openai`` 静默回落 deepseek 是这里最贵的
+        # 一次误配置（用户以为换了厂商，实际还在用上一家）。新增 section 要走显式改代码。
+        extra="forbid",
     )
 
     server: ServerSettings = Field(default_factory=ServerSettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
+    subagent: SubagentSettings = Field(default_factory=SubagentSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
 
     @classmethod
@@ -203,22 +252,42 @@ class HarnessSettings(BaseSettings):
         相对路径按**项目根目录**解析，而不是进程 cwd——否则换个目录启动服务就会
         另起一个空的 ``data/harness.db``，看起来像「数据丢了」。
         """
-        path = Path(self.database.path).expanduser()
-        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+        return _resolve_under_project_root(self.database.path)
+
+    def workspace_path(self) -> Path:
+        """工具工作区根目录；相对路径同样按项目根解析。"""
+        return _resolve_under_project_root(self.workspace.path)
+
+
+def _resolve_under_project_root(value: str) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
 
 
 def _resolve_api_key(profile: ProviderProfile, name: str) -> str | None:
     """解析成真实密钥。
 
-    占位符允许指向任意变量（自定义网关用 ``${GW_KEY}`` 是合法的），但如果它指的
-    是**另一家厂商的官方变量**（``${OPENAI_API_KEY}`` 却挂在 deepseek 上），那基本
-    是从示例配置里抄错了行，直接报错；配置串味在 profile 模型里本就不可能发生。
-    比较时统一大写：``${openai_api_key}`` 这种小写写法同样是抄错行，不该悄悄落到
-    「没有密钥」。
+    规则（按顺序）：
+
+    1. ``${VAR}`` 占位符：变量名必须非空；如果它指向**另一家厂商的官方变量**（含
+       小写写法）视为抄错行，直接报错；
+    2. 字面值：原样返回；
+    3. 留空：只有**使用适配器默认域名**时才回落到厂商环境变量。
+       **自定义 ``base_url`` 必须显式写 api_key**——否则会把厂商官方密钥发给一个
+       任意地址（自建网关、代理、第三方中转），这是比"没配 key"严重得多的错误；
+    4. 以 ``$`` 开头但不是合法 ``${NAME}`` 的写法（``$DEEPSEEK_API_KEY``、
+       ``${DEEPSEEK_API_KEY``）视为坏配置，而不是当成字面密钥去发 401。
     """
     raw = (profile.api_key or "").strip()
     expected = ADAPTER_ENV_KEYS[profile.adapter]
-    if raw.startswith("${") and raw.endswith("}"):
+
+    if raw.startswith("${"):
+        if not raw.endswith("}"):
+            raise ConfigError(
+                f"profile {name!r} 的 api_key 占位符缺少右花括号：{raw!r}；"
+                f"应写成 ${{{expected}}} 这样的形式",
+                detail={"provider": name, "adapter": profile.adapter},
+            )
         variable = raw[2:-1].strip()
         if not variable:
             raise ConfigError(
@@ -234,8 +303,24 @@ def _resolve_api_key(profile: ProviderProfile, name: str) -> str | None:
                 detail={"provider": name, "adapter": profile.adapter, "placeholder": variable},
             )
         return os.environ.get(variable) or None
+
+    if raw.startswith("$"):
+        raise ConfigError(
+            f"profile {name!r} 的 api_key 看起来是坏的占位符：{raw!r}；"
+            f"占位符必须写成 ${{变量名}}，字面密钥不要以 $ 开头",
+            detail={"provider": name, "adapter": profile.adapter},
+        )
+
     if raw:
         return raw
+
+    if profile.base_url:
+        raise ConfigError(
+            f"profile {name!r} 使用了自定义 base_url（{profile.base_url}），"
+            f"但没有显式填写 api_key；请写明 ${{{expected}}} 或其他变量名，"
+            f"避免把厂商官方密钥发给非官方地址",
+            detail={"provider": name, "adapter": profile.adapter, "base_url": profile.base_url},
+        )
     return os.environ.get(expected) or None
 
 

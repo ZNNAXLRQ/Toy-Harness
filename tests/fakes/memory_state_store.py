@@ -3,7 +3,7 @@
 只在 ``tests/`` 下存在，**不进入 app 包**：应用里出现第二个状态实现就会出现两份真相。
 
 它与将来 C 的 SQLite 实现必须通过同一套 ``tests/contracts`` 用例，包括：事务回滚、
-条件派发、审批拒绝写入、UNKNOWN 的幂等判定、补偿凭据读回。
+条件消费/派发、审批拒绝写入、已决策未消费的恢复、UNKNOWN 的幂等判定、补偿凭据读回。
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ from app.common.api.state_store import (
     OPEN_TOOL_STATUSES,
     TERMINAL_SESSION_STATUSES,
     TOOL_TRANSITIONS,
+    ApprovalDecision,
+    ApprovalStatus,
     AssistantTurn,
     MessageRole,
     SessionStatus,
@@ -29,8 +31,15 @@ from app.common.api.state_store import (
     TurnStatus,
 )
 from app.common.api.tool import ToolResult
-from app.common.exception import ConflictError, NotFoundError, StateError
+from app.common.exception import (
+    ApprovalError,
+    ConflictError,
+    NotFoundError,
+    StateError,
+)
 
+_CLAIM_TARGETS = frozenset({ToolCallStatus.APPROVED, ToolCallStatus.DISPATCHED})
+_NON_TAIL_ROLES = frozenset({MessageRole.SUMMARY, MessageRole.SYSTEM})
 _REOPENING_ROLES = frozenset({MessageRole.USER, MessageRole.TOOL})
 
 
@@ -93,6 +102,30 @@ class _ToolCall:
     created_at: int
 
 
+@dataclass
+class _Approval:
+    id: str
+    session_id: str
+    call_id: str
+    tool_name: str
+    arguments: str | None
+    description: str | None
+    status: str
+    decided_by: str | None
+    created_at: int
+    decided_at: int | None
+
+
+@dataclass
+class _Audit:
+    id: str
+    session_id: str | None
+    actor: str
+    action: str
+    detail: str | None
+    created_at: int
+
+
 class MemoryStateStore:
     """满足 ``app.common.api.state_store.StateStore`` 的最小实现。"""
 
@@ -101,6 +134,8 @@ class MemoryStateStore:
         self._messages: dict[str, list[_Message]] = {}
         self._calls: dict[str, _ToolCall] = {}
         self._observations: dict[str, str] = {}
+        self._approvals: dict[str, _Approval] = {}
+        self._audits: list[_Audit] = []
 
     # --- 会话 ---
 
@@ -128,6 +163,8 @@ class MemoryStateStore:
         session = self._sessions.get(session_id)
         if session is None:
             raise NotFoundError(f"session {session_id} not found")
+        if session.status in {status.value for status in TERMINAL_SESSION_STATUSES}:
+            raise StateError(f"session {session_id} is {session.status}; terminal state is immutable")
         for key, value in fields.items():
             if key == "id":
                 raise StateError("session id is immutable")
@@ -156,8 +193,11 @@ class MemoryStateStore:
         *,
         tool_call_id: str | None = None,
     ) -> _Message:
-        if session_id not in self._sessions:
+        session = self._sessions.get(session_id)
+        if session is None:
             raise NotFoundError(f"session {session_id} not found")
+        if session.status in {status.value for status in TERMINAL_SESSION_STATUSES}:
+            raise ConflictError(f"session {session_id} is {session.status}; cannot append message")
         try:
             normalized = MessageRole(role)
         except ValueError as error:
@@ -178,8 +218,11 @@ class MemoryStateStore:
     async def record_assistant_turn(
         self, session_id: str, response: ModelResponse
     ) -> AssistantTurn:
-        if session_id not in self._sessions:
+        session = self._sessions.get(session_id)
+        if session is None:
             raise NotFoundError(f"session {session_id} not found")
+        if session.status in {status.value for status in TERMINAL_SESSION_STATUSES}:
+            raise ConflictError(f"session {session_id} is {session.status}; cannot record turn")
         ids = [call.id for call in response.tool_calls]
         if len(set(ids)) != len(ids):
             raise StateError("assistant turn contains duplicate tool call ids")
@@ -211,15 +254,13 @@ class MemoryStateStore:
 
     # --- 工具调用与观察 ---
 
-    async def set_tool_status(
-        self, call_id: str, status: ToolCallStatus, *, error: str | None = None
-    ) -> _ToolCall:
+    async def set_tool_status(self, call_id: str, status: ToolCallStatus) -> _ToolCall:
         row = self._calls.get(call_id)
         if row is None:
             raise NotFoundError(f"tool call {call_id} not found")
-        if status == ToolCallStatus.DISPATCHED:
+        if status in (ToolCallStatus.DISPATCHED, ToolCallStatus.APPROVED):
             raise StateError(
-                f"dispatch of {call_id} must go through claim_tool_call, not set_tool_status"
+                f"{call_id}: {status} must go through claim_tool_call, not set_tool_status"
             )
         current = ToolCallStatus(row.status)
         if status not in TOOL_TRANSITIONS[current]:
@@ -237,8 +278,17 @@ class MemoryStateStore:
         row = self._calls.get(call_id)
         if row is None:
             raise NotFoundError(f"tool call {call_id} not found")
+        if to_status not in _CLAIM_TARGETS:
+            raise StateError(f"{call_id}: claim target {to_status} is not allowed")
         if to_status not in TOOL_TRANSITIONS[from_status]:
-            raise StateError(f"illegal transition {from_status} -> {to_status} for {call_id}")
+            raise StateError(f"{call_id}: illegal transition {from_status} -> {to_status}")
+        session = self._sessions.get(row.session_id)
+        if session is None:
+            raise NotFoundError(f"session {row.session_id} not found")
+        if session.status in {status.value for status in TERMINAL_SESSION_STATUSES}:
+            raise ConflictError(
+                f"session {row.session_id} is {session.status}; cannot claim {call_id}"
+            )
         if row.status != from_status.value:
             return False
         row.status = to_status.value
@@ -281,9 +331,127 @@ class MemoryStateStore:
             return None
         return json.loads(payload).get("receipt")
 
+    # --- 审批记录 ---
+
+    async def record_approval_request(
+        self,
+        session_id: str,
+        call_id: str,
+        tool_name: str,
+        arguments: str | None,
+        description: str | None,
+    ) -> _Approval:
+        if session_id not in self._sessions:
+            raise NotFoundError(f"session {session_id} not found")
+        existing = self._approval_for_call(call_id)
+        if existing is not None:
+            return existing
+        row = self._calls.get(call_id)
+        if row is None:
+            raise NotFoundError(f"tool call {call_id} not found")
+        if row.status != ToolCallStatus.PENDING.value:
+            raise StateError(f"tool call {call_id} is {row.status}, cannot request approval")
+        approval = _Approval(
+            id=uuid4().hex,
+            session_id=session_id,
+            call_id=call_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            description=description,
+            status=ApprovalStatus.PENDING.value,
+            decided_by=None,
+            created_at=_now(),
+            decided_at=None,
+        )
+        self._approvals[approval.id] = approval
+        row.status = ToolCallStatus.AWAITING_APPROVAL.value
+        return approval
+
+    async def decide_approval(
+        self, approval_id: str, decision: ApprovalDecision, *, actor: str
+    ) -> _Approval:
+        approval = self._approvals.get(approval_id)
+        if approval is None:
+            raise NotFoundError(f"approval {approval_id} not found")
+        if approval.status != ApprovalStatus.PENDING.value:
+            raise ApprovalError(
+                f"approval {approval_id} already decided as {approval.status}"
+            )
+        call = self._calls.get(approval.call_id)
+        if call is None:
+            raise NotFoundError(f"tool call {approval.call_id} not found")
+        if call.status != ToolCallStatus.AWAITING_APPROVAL.value:
+            raise ConflictError(
+                f"tool call {approval.call_id} is {call.status}, approval can no longer be decided"
+            )
+        approval.status = ApprovalStatus(decision).value
+        approval.decided_by = actor
+        approval.decided_at = _now()
+        self._audits.append(
+            _Audit(
+                id=uuid4().hex,
+                session_id=approval.session_id,
+                actor=actor,
+                action="approval_decided",
+                detail=json.dumps(
+                    {
+                        "approval_id": approval.id,
+                        "call_id": approval.call_id,
+                        "decision": approval.status,
+                    },
+                    ensure_ascii=False,
+                ),
+                created_at=_now(),
+            )
+        )
+        return approval
+
+    async def get_approval(self, approval_id: str) -> _Approval | None:
+        return self._approvals.get(approval_id)
+
+    async def get_approval_for_call(self, call_id: str) -> _Approval | None:
+        return self._approval_for_call(call_id)
+
+    async def list_pending_approvals(
+        self, session_id: str | None = None
+    ) -> Sequence[_Approval]:
+        return [
+            approval
+            for approval in self._approvals.values()
+            if approval.status == ApprovalStatus.PENDING.value
+            and (session_id is None or approval.session_id == session_id)
+        ]
+
+    def _approval_for_call(self, call_id: str) -> _Approval | None:
+        for approval in self._approvals.values():
+            if approval.call_id == call_id:
+                return approval
+        return None
+
     # --- 一轮 ---
 
-    async def load_open_turn(self, session_id: str) -> TurnState | None:
+    def _current_turn_calls(self, session_id: str) -> list[_ToolCall]:
+        """只取本轮（最后一条 user 消息之后）产生的调用。"""
+        messages = self._messages.get(session_id, [])
+        last_user_seq = max(
+            (m.seq for m in messages if m.role == MessageRole.USER), default=0
+        )
+        seq_by_message = {m.id: m.seq for m in messages}
+        return [
+            call
+            for call in self._calls.values()
+            if call.session_id == session_id
+            and (call.message_id is None or seq_by_message.get(call.message_id, 0) > last_user_seq)
+        ]
+
+    def _tail_role(self, session_id: str) -> str | None:
+        messages = self._messages.get(session_id, [])
+        for message in reversed(messages):
+            if message.role not in {role.value for role in _NON_TAIL_ROLES}:
+                return message.role
+        return None
+
+    def _project(self, session_id: str, *, destructive: bool) -> TurnState | None:
         session = self._sessions.get(session_id)
         if session is None:
             raise NotFoundError(f"session {session_id} not found")
@@ -291,61 +459,62 @@ class MemoryStateStore:
             return None
 
         messages = self._messages.get(session_id, [])
-        calls = [c for c in self._calls.values() if c.session_id == session_id]
         iteration = _iteration(messages)
+        turn_calls = self._current_turn_calls(session_id)
+        in_flight = [
+            call.id
+            for call in turn_calls
+            if call.status == ToolCallStatus.DISPATCHED.value
+            and call.id not in self._observations
+        ]
 
-        open_calls = [c for c in calls if c.status in {s.value for s in OPEN_TOOL_STATUSES}]
-        unknown: list[str] = []
-        for call in open_calls:
-            if (
-                call.status == ToolCallStatus.DISPATCHED.value
-                and call.id not in self._observations
-            ):
-                call.status = ToolCallStatus.UNKNOWN.value
-                unknown.append(call.id)
-        if unknown:
-            # 唯一的恢复写：把这一轮钉死为 failed，避免下次读取重新打开（等于重放）。
+        if destructive and in_flight:
+            for call_id in in_flight:
+                self._calls[call_id].status = ToolCallStatus.UNKNOWN.value
             session.status = SessionStatus.FAILED.value
             session.updated_at = _now()
             return TurnState(
                 session_id=session_id,
                 status=TurnStatus.FAILED,
                 iteration=iteration,
-                notes={"unknown_calls": unknown},
+                notes={"unknown_calls": in_flight},
             )
 
-        still_open = [c for c in open_calls if c.status in {s.value for s in OPEN_TOOL_STATUSES}]
-        awaiting = [c for c in still_open if c.status == ToolCallStatus.AWAITING_APPROVAL.value]
+        open_calls = [c for c in turn_calls if c.status in {s.value for s in OPEN_TOOL_STATUSES}]
+        awaiting = [c for c in open_calls if c.status == ToolCallStatus.AWAITING_APPROVAL.value]
         if len(awaiting) > 1:
             raise StateError(
                 "more than one call is awaiting approval in a single turn: "
                 + ", ".join(call.id for call in awaiting)
             )
-        # 拒绝即终止：本轮已出现过 denied 调用时，不能因为尾部是工具消息就把这一轮
-        # 重新打开，否则模型可以绕开拒绝继续行动。
-        last_user_seq = max(
-            (m.seq for m in messages if m.role == MessageRole.USER), default=0
-        )
-        seq_by_message = {m.id: m.seq for m in messages}
-        current_turn_calls = [
-            c
-            for c in calls
-            if c.message_id and seq_by_message.get(c.message_id, 0) > last_user_seq
-        ]
-        if any(c.status == ToolCallStatus.DENIED.value for c in current_turn_calls):
+        if any(c.status == ToolCallStatus.DENIED.value for c in turn_calls):
             return None
         if awaiting:
+            call = awaiting[0]
+            approval = self._approval_for_call(call.id)
+            decided = approval is not None and approval.status != ApprovalStatus.PENDING.value
             return TurnState(
                 session_id=session_id,
                 status=TurnStatus.WAITING_APPROVAL,
                 iteration=iteration,
-                pending_call_id=awaiting[0].id,
+                pending_call_id=call.id,
+                pending_approval_id=approval.id if decided else None,
             )
-        if still_open:
-            return TurnState(session_id=session_id, status=TurnStatus.OPEN, iteration=iteration)
-        if messages and messages[-1].role in {role.value for role in _REOPENING_ROLES}:
+        if open_calls:
+            state = TurnState(session_id=session_id, status=TurnStatus.OPEN, iteration=iteration)
+            if in_flight:
+                state.notes["in_flight"] = list(in_flight)
+            return state
+        tail = self._tail_role(session_id)
+        if tail in {role.value for role in _REOPENING_ROLES}:
             return TurnState(session_id=session_id, status=TurnStatus.OPEN, iteration=iteration)
         return None
+
+    async def load_open_turn(self, session_id: str) -> TurnState | None:
+        return self._project(session_id, destructive=True)
+
+    async def peek_open_turn(self, session_id: str) -> TurnState | None:
+        return self._project(session_id, destructive=False)
 
     # --- 事务 ---
 
@@ -356,9 +525,18 @@ class MemoryStateStore:
             copy.deepcopy(self._messages),
             copy.deepcopy(self._calls),
             dict(self._observations),
+            copy.deepcopy(self._approvals),
+            [copy.deepcopy(row) for row in self._audits],
         )
         try:
             yield None
         except BaseException:
-            self._sessions, self._messages, self._calls, self._observations = snapshot
+            (
+                self._sessions,
+                self._messages,
+                self._calls,
+                self._observations,
+                self._approvals,
+                self._audits,
+            ) = snapshot
             raise

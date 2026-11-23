@@ -38,21 +38,29 @@ SQLite 实现里必须是**单条条件更新**（``UPDATE ... WHERE status = :f
 
 ## 一轮的边界与恢复
 
-``TurnState`` 是**投影**，没有 ``save_turn``。边界规则：
+``TurnState`` 是**投影**，没有 ``save_turn``。**只扫描本轮**（最后一条 ``user`` 消息之后
+产生的调用），上一轮遗留的调用不参与本轮判定。边界规则：
 
 - ``sessions.status`` 为 ``failed`` / ``abandoned`` → 没有 open turn（``None``）。
-  只有这两个是「硬终态」；``idle`` / ``completed`` 不阻断推导——一轮完成后用户再发
-  消息就是新一轮，靠状态字段判断反而会把新轮挡掉。
-- 存在 ``awaiting_approval`` → ``WAITING_APPROVAL``。**同一时刻最多一条**；实现发现
-  两条及以上时必须抛 ``StateError``，不允许静默取第一条——那意味着上一轮的挂起没被
-  正确消费。
-- 本轮（最后一条 user 消息之后）出现过 ``denied`` 调用 → 没有 open turn（``None``）；
-  拒绝是安全边界，不能因为「尾部是工具消息」就把这一轮重新打开。
-- 存在 ``dispatched`` 而无观察结果 → 判 ``unknown``，落会话 ``failed``，返回带
-  ``notes["unknown_calls"]`` 的 ``FAILED``（**唯一一处恢复写**，幂等，判过即不可恢复）；
-- 其余情况看最后一条消息：``user`` / ``tool`` → ``OPEN``（模型还没回复，或工具结果
-  已落等待下一次模型调用）；``assistant`` / ``summary`` / ``system`` → ``None``。
-  ``summary`` 不能重新打开已结束的轮次。
+  只有这两个是硬终态；``idle`` / ``completed`` 不阻断推导——一轮完成后用户再发消息
+  就是新一轮。
+- 本轮存在 ``awaiting_approval``：
+  - 能找到对应审批记录且**已决策** → ``WAITING_APPROVAL``，并同时给出
+    ``pending_call_id`` 与 ``pending_approval_id``（重启后靠它恢复，见 agent_loop）；
+  - 未决策 → ``WAITING_APPROVAL``，只给 ``pending_call_id``。
+  **同一时刻最多一条**；实现发现两条及以上必须抛 ``StateError``。
+- 本轮存在 ``pending`` / ``approved`` 的调用 → ``OPEN``（模型已回、工具未派发，
+  或审批已消费待派发）。**这两态必须有恢复路径**，否则崩在派发前就会丢轮；
+  ``approved`` 表示审批已消费、等派发，loop 恢复时用 ``claim_tool_call(approved→dispatched)``
+  抢占执行权。
+- 本轮出现过 ``denied`` 调用 → 没有 open turn（``None``）；拒绝是安全边界。
+- 本轮有 ``dispatched`` 而无观察结果 → 判 ``unknown``，落会话 ``failed``，返回带
+  ``notes["unknown_calls"]`` 的 ``FAILED``（**唯一一处恢复写**，幂等，判过即不可恢复）。
+  注意：这是**破坏性**判定，只允许由「启动恢复」入口独占调用；普通查询应使用
+  ``peek_open_turn``（见 ``AgentLoop`` 的调用者约束）。
+- 以上都不满足时看最后一条**非 summary/system** 消息：``user`` / ``tool`` → ``OPEN``
+  （模型还没回复，或工具结果已落等待下一次模型调用）；``assistant`` → ``None``。
+  ``summary`` 是压缩注记，既不能重开已结束的轮次，也不能把进行中的轮次误判为结束。
 
 ``iteration`` = 本轮（最后一条 ``user`` 消息之后）assistant 消息条数，可从表里数出来。
 **token 用量与 ``reasoning_content`` 都不持久化**：schema 没有对应列。恢复后的历史
@@ -184,6 +192,35 @@ class ToolCallView(Protocol):
     created_at: int
 
 
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
+class ApprovalDecision(StrEnum):
+    """人工决策的取值（不含 pending）。放在这里是为了避免 api 包内循环 import。"""
+
+    APPROVED = "approved"
+    DENIED = "denied"
+
+
+class ApprovalView(Protocol):
+    """``approvals`` 表的一行（schema.sql 新增表；C 的 dataclass 自动满足）。"""
+
+    id: str
+    session_id: str
+    call_id: str
+    tool_name: str
+    arguments: str | None
+    """模型给的原始 JSON 文本，与 ``ToolCallView.arguments`` 一致，不提前解析。"""
+    description: str | None
+    status: str
+    decided_by: str | None
+    created_at: int
+    decided_at: int | None
+
+
 @dataclass
 class TurnState:
     """一轮执行的投影，由 ``StateStore.load_open_turn`` 重建（不落库）。"""
@@ -193,6 +230,8 @@ class TurnState:
     iteration: int = 0
     """本轮已发生的模型调用次数，由 assistant 消息条数数出来。"""
     pending_call_id: str | None = None
+    pending_approval_id: str | None = None
+    """挂起时对应的审批记录 id；已决策未消费时用于重启恢复。"""
     notes: dict[str, Any] = field(default_factory=dict)
 
 
@@ -257,13 +296,12 @@ class StateStore(Protocol):
         self,
         call_id: str,
         status: ToolCallStatus,
-        *,
-        error: str | None = None,
     ) -> ToolCallView:
         """按 ``TOOL_TRANSITIONS`` 迁移；终态迁出、非法迁移抛 ``StateError``。
 
         **不允许**迁移到 ``dispatched``（抛 ``StateError``）：派发必须走
-        ``claim_tool_call``，否则就绕过了「只能有一方执行」的保证。
+        ``claim_tool_call``。也不允许迁移到 ``approved``——消费审批同样是一次 CAS，
+        只有这样「两个恢复者同时消费同一条审批」才有一方必然失败。
         """
         ...
 
@@ -276,8 +314,15 @@ class StateStore(Protocol):
     ) -> bool:
         """条件迁移（CAS）：当前状态等于 ``from_status`` 才改成 ``to_status``。
 
-        返回 ``True`` 的那一方是**唯一**允许执行工具的人；并发恢复的其余调用者拿到
-        ``False``，从而不会重复派发。只允许一次迁移，不做重试。
+        只允许两种用途：
+        - 消费审批：``awaiting_approval → approved``；
+        - 派发执行：``approved → dispatched`` / ``pending → dispatched``。
+
+        返回 ``True`` 的那一方是**唯一**允许继续的人；并发恢复的其余调用者拿到
+        ``False``，不会重复消费审批或重复派发。**会话已处于 ``failed``/``abandoned``
+        时抛 ``ConflictError``**——否则副作用会发生而没有观察结果可以落。
+        其他迁移（拒绝、失败、完成）一律走 ``set_tool_status``/``finish_tool_call``，
+        传非法 ``from/to`` 组合必须抛 ``StateError``。
 
         SQLite 实现必须用单条条件更新判定，不得先查后写：
 
@@ -301,10 +346,51 @@ class StateStore(Protocol):
         """
         ...
 
-    async def list_tool_calls(self, session_id: str) -> Sequence[ToolCallView]: ...
+    async def list_tool_calls(self, session_id: str) -> Sequence[ToolCallView]:
+        """按创建顺序返回该会话的全部工具调用（回滚据此计算逆序补偿）。"""
+        ...
 
     async def get_receipt(self, call_id: str) -> str | None:
         """读回成功调用的补偿凭据（``reversible`` 为真时才有）。"""
+        ...
+
+    # --- 审批记录（approvals 表） ---
+    async def record_approval_request(
+        self,
+        session_id: str,
+        call_id: str,
+        tool_name: str,
+        arguments: str | None,
+        description: str | None,
+    ) -> ApprovalView:
+        """同事务完成两件事：插审批行（status=pending）+ 把调用置 ``awaiting_approval``。
+
+        按 ``call_id`` 唯一：重复调用返回已有记录（幂等），不改状态。
+        调用必须处于 ``pending``，否则抛 ``StateError``。
+        """
+        ...
+
+    async def decide_approval(
+        self, approval_id: str, decision: ApprovalDecision, *, actor: str
+    ) -> ApprovalView:
+        """同事务写入决策（approved/denied）与 ``audit_logs`` 审计行。
+
+        已决策的记录再决策抛 ``ApprovalError``；**本方法不改 tool_calls 状态**——
+        审批消费是一次独立的 CAS（``awaiting_approval → approved``），避免
+        "决策成功但没人执行" 或 "执行了但没有决策记录"。
+        """
+        ...
+
+    async def get_approval(self, approval_id: str) -> ApprovalView | None: ...
+
+    async def get_approval_for_call(self, call_id: str) -> ApprovalView | None:
+        """按调用找审批（**含已决策**）：恢复时判断「已决策未消费」。"""
+        ...
+
+    async def list_pending_approvals(
+        self, session_id: str | None = None
+    ) -> Sequence[ApprovalView]:
+        """未决策的审批队列；Web 用它渲染审批列表。"""
         ...
 
     # --- 一轮 ---
@@ -314,6 +400,18 @@ class StateStore(Protocol):
         这是**恢复入口**，也是唯一允许写状态的地方：判定 ``unknown`` 时会把会话置为
         ``failed``（幂等，判过一次就不可再恢复）。需要结束一轮时由 loop 调
         ``update_session(status=...)``。
+
+        **调用者约束**：只允许「启动恢复」与 loop 的 turn 入口调用，且同一会话内串行；
+        普通查询（例如 Web 的 GET 会话）必须用 ``peek_open_turn``，否则会把正在执行的
+        ``dispatched`` 调用误判成 ``unknown``。
+        """
+        ...
+
+    async def peek_open_turn(self, session_id: str) -> TurnState | None:
+        """只读投影：规则与 ``load_open_turn`` 相同，但**不写任何东西**。
+
+        ``dispatched`` 且无观察结果的调用在 notes["in_flight"] 里报告，不判 UNKNOWN。
+        UI/只读接口用它；恢复判定用 ``load_open_turn``。
         """
         ...
 

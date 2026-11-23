@@ -14,27 +14,23 @@
 - 事务回滚；结果序列化失败不落地半个结果。
 """
 
+import asyncio
+
 import pytest
 
 from app.common.api.llm_provider import ModelResponse, ModelToolCall
 from app.common.api.state_store import (
+    ApprovalDecision,
+    ApprovalStatus,
     MessageRole,
     SessionStatus,
     ToolCallStatus,
     TurnStatus,
 )
 from app.common.api.tool import ToolResult
-from app.common.exception import ConflictError, NotFoundError, StateError
-from tests.fakes.memory_state_store import MemoryStateStore
+from app.common.exception import ApprovalError, ConflictError, NotFoundError, StateError
 
-
-@pytest.fixture(params=["memory", "sqlite"])
-async def store(request):
-    if request.param == "memory":
-        return MemoryStateStore()
-    pytest.skip(
-        "C 的 SQLiteStateStore 尚未交付；交付后在 tests/contracts 里构造真实实现即可复用本套测试"
-    )
+# ``store`` fixture 在 conftest.py 里：实现方（C）只需要改那一处。
 
 
 def _response(*call_ids, content=None):
@@ -169,13 +165,30 @@ async def test_dispatched_result_cannot_be_turned_into_denied(store):
 
 
 async def test_execution_requires_a_successful_claim_first(store):
-    """approved 不等于 dispatched：没有 claim 成功就不许写结果。"""
+    """approved 不等于 dispatched：没有派发 CAS 就不许写结果。"""
     await _turn_with_calls(store, "call-1")
     await store.set_tool_status("call-1", ToolCallStatus.AWAITING_APPROVAL)
-    await store.set_tool_status("call-1", ToolCallStatus.APPROVED)
+    assert await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.AWAITING_APPROVAL, to_status=ToolCallStatus.APPROVED
+    )
 
     with pytest.raises(StateError):
         await store.finish_tool_call("call-1", ToolResult("success", "ok"))
+
+
+async def test_approved_must_be_claimed_before_dispatch(store):
+    await _turn_with_calls(store, "call-1")
+    await store.set_tool_status("call-1", ToolCallStatus.AWAITING_APPROVAL)
+    await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.AWAITING_APPROVAL, to_status=ToolCallStatus.APPROVED
+    )
+
+    assert await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.APPROVED, to_status=ToolCallStatus.DISPATCHED
+    )
+    assert not await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.APPROVED, to_status=ToolCallStatus.DISPATCHED
+    )
 
 
 # --- 结果、凭据与原子性 ---
@@ -413,3 +426,201 @@ async def test_iteration_counts_every_model_call_in_the_turn(store):
     state = await store.load_open_turn(session.id)
 
     assert state is not None and state.iteration == 2
+# --- 审批记录（approvals 表）---
+
+
+async def _request_approval(store, session_id: str, call_id: str):
+    call = next(c for c in await store.list_tool_calls(session_id) if c.id == call_id)
+    return await store.record_approval_request(
+        session_id, call_id, call.tool_name, call.arguments, "needs approval"
+    )
+
+
+async def test_approval_request_and_decision_roundtrip(store):
+    session = await _turn_with_calls(store, "call-1")
+
+    approval = await _request_approval(store, session.id, "call-1")
+    assert approval.status == ApprovalStatus.PENDING.value
+    calls = await store.list_tool_calls(session.id)
+    assert calls[0].status == ToolCallStatus.AWAITING_APPROVAL.value
+    assert [a.id for a in await store.list_pending_approvals(session.id)] == [approval.id]
+
+    decided = await store.decide_approval(approval.id, ApprovalDecision.APPROVED, actor="teacher")
+    assert decided.status == ApprovalStatus.APPROVED.value
+    assert decided.decided_by == "teacher"
+
+    # 决策后不在 pending 队列里，但仍可按 call 查回（恢复用）。
+    assert await store.list_pending_approvals(session.id) == []
+    assert (await store.get_approval_for_call("call-1")).id == approval.id
+
+    # 决策不改调用状态：消费是独立的一次 CAS。
+    calls = await store.list_tool_calls(session.id)
+    assert calls[0].status == ToolCallStatus.AWAITING_APPROVAL.value
+
+
+async def test_approval_request_is_idempotent_and_decision_is_single_shot(store):
+    session = await _turn_with_calls(store, "call-1")
+
+    first = await _request_approval(store, session.id, "call-1")
+    second = await _request_approval(store, session.id, "call-1")
+    assert first.id == second.id
+
+    await store.decide_approval(first.id, ApprovalDecision.DENIED, actor="teacher")
+    with pytest.raises(ApprovalError):
+        await store.decide_approval(first.id, ApprovalDecision.APPROVED, actor="teacher")
+
+
+async def test_decided_approval_is_recoverable_after_restart(store):
+    """已决策未消费：重启后 load_open_turn 必须同时给出 call 与 approval id。"""
+    session = await _turn_with_calls(store, "call-1")
+    approval = await _request_approval(store, session.id, "call-1")
+    await store.decide_approval(approval.id, ApprovalDecision.APPROVED, actor="teacher")
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None
+    assert state.status == TurnStatus.WAITING_APPROVAL
+    assert state.pending_call_id == "call-1"
+    assert state.pending_approval_id == approval.id
+
+
+async def test_undecided_approval_reports_only_the_call(store):
+    session = await _turn_with_calls(store, "call-1")
+    await _request_approval(store, session.id, "call-1")
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None and state.status == TurnStatus.WAITING_APPROVAL
+    assert state.pending_call_id == "call-1"
+    assert state.pending_approval_id is None
+
+
+# --- 恢复：pending / approved / summary / 只读投影 ---
+
+
+async def test_pending_call_after_assistant_message_is_resumable(store):
+    """模型已回、工具还没派发就崩溃：这一轮不能丢。"""
+    session = await _turn_with_calls(store, "call-1")
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None
+    assert state.status == TurnStatus.OPEN
+    assert state.iteration == 1
+
+
+async def test_approved_call_is_resumable_and_still_open(store):
+    """崩在两次 CAS 之间（approved）：仍能恢复，等派发。"""
+    session = await _turn_with_calls(store, "call-1")
+    await store.set_tool_status("call-1", ToolCallStatus.AWAITING_APPROVAL)
+    await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.AWAITING_APPROVAL, to_status=ToolCallStatus.APPROVED
+    )
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None and state.status == TurnStatus.OPEN
+
+
+async def test_summary_in_the_middle_does_not_close_the_turn(store):
+    """工具结果之后追加摘要，不能把还有待执行调用的一轮判成结束。"""
+    session = await _turn_with_calls(store, "call-1")
+    await store.append_message(session.id, MessageRole.SUMMARY, "压缩后的历史")
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None and state.status == TurnStatus.OPEN
+
+
+async def test_peek_does_not_kill_an_in_flight_call(store):
+    """只读投影：正在执行的调用不能被判 UNKNOWN。"""
+    session = await _turn_with_calls(store, "call-1")
+    await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+    )
+
+    state = await store.peek_open_turn(session.id)
+
+    assert state is not None
+    assert state.notes["in_flight"] == ["call-1"]
+    calls = await store.list_tool_calls(session.id)
+    assert calls[0].status == ToolCallStatus.DISPATCHED.value
+
+
+# --- 终态与并发约束 ---
+
+
+async def test_claim_on_terminal_session_is_rejected(store):
+    session = await _turn_with_calls(store, "call-1")
+    await store.update_session(session.id, status=SessionStatus.FAILED.value)
+
+    with pytest.raises(ConflictError):
+        await store.claim_tool_call(
+            "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+        )
+
+
+async def test_terminal_session_cannot_be_updated(store):
+    session = await _turn_with_calls(store, "call-1")
+    await store.update_session(session.id, status=SessionStatus.FAILED.value)
+
+    with pytest.raises(StateError):
+        await store.update_session(session.id, status=SessionStatus.OPEN.value)
+
+
+async def test_claim_only_allows_consume_and_dispatch_targets(store):
+    await _turn_with_calls(store, "call-1")
+
+    with pytest.raises(StateError):
+        await store.claim_tool_call(
+            "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DENIED
+        )
+
+
+async def test_concurrent_claim_has_exactly_one_winner(store):
+    await _turn_with_calls(store, "call-1")
+
+    results = await asyncio.gather(
+        store.claim_tool_call(
+            "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+        ),
+        store.claim_tool_call(
+            "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+        ),
+    )
+
+    assert sorted(results) == [False, True]
+
+
+async def test_duplicate_call_ids_leave_no_message(store):
+    session = await store.create_session()
+
+    with pytest.raises(StateError):
+        await store.record_assistant_turn(session.id, _response("same", "same"))
+
+    assert list(await store.list_messages(session.id)) == []
+    assert list(await store.list_tool_calls(session.id)) == []
+
+
+async def test_terminal_call_cannot_be_moved_directly(store):
+    session = await _turn_with_calls(store, "call-1")
+    await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+    )
+    await store.finish_tool_call("call-1", ToolResult("success", "ok"))
+
+    with pytest.raises(StateError):
+        await store.set_tool_status("call-1", ToolCallStatus.PENDING)
+
+
+async def test_transaction_rolls_back_tool_status_and_approvals(store):
+    session = await _turn_with_calls(store, "call-1")
+
+    with pytest.raises(RuntimeError):
+        async with store.transaction():
+            await _request_approval(store, session.id, "call-1")
+            raise RuntimeError("boom")
+
+    calls = await store.list_tool_calls(session.id)
+    assert calls[0].status == ToolCallStatus.PENDING.value
+    assert await store.list_pending_approvals(session.id) == []

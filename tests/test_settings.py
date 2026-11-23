@@ -282,3 +282,90 @@ def test_relative_database_path_resolves_against_project_root(config_file):
     settings = HarnessSettings()
 
     assert settings.database_path() == (PROJECT_ROOT / "data/harness.db").resolve()
+
+# --- 配置：新增 section、拼错键、坏占位符、自定义端点 ---
+
+
+def test_new_sections_have_defaults(config_file):
+    config_file.write_text("", encoding="utf-8")
+    settings = HarnessSettings()
+
+    assert settings.workspace.path == "./workspace"
+    assert settings.agent.max_iterations == 15
+    assert settings.agent.token_budget == 32000
+    assert settings.subagent.max_concurrency == 2
+    assert settings.subagent.max_depth == 2
+
+
+def test_unknown_top_level_key_is_rejected(config_file):
+    """``llm.activ: openai`` 这种拼错必须报错，而不是静默继续用 deepseek。"""
+    config_file.write_text("llm:\n  activ: openai\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+def test_unknown_section_field_is_rejected(config_file):
+    config_file.write_text("agent:\n  max_iterations: 5\n  turbo: true\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+@pytest.mark.parametrize("broken", ["$DEEPSEEK_API_KEY", "${DEEPSEEK_API_KEY"])
+def test_malformed_placeholder_is_rejected(config_file, broken):
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n    local:\n      adapter: deepseek\n"
+        f'      api_key: "{broken}"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError):
+        HarnessSettings().resolve_provider()
+
+
+def test_custom_base_url_requires_explicit_api_key(config_file, monkeypatch):
+    """自定义端点不能静默回落到厂商官方密钥。"""
+    config_file.write_text(
+        "llm:\n  active: gateway\n  providers:\n    gateway:\n      adapter: openai\n"
+        "      base_url: http://localhost:8000/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-official")
+
+    with pytest.raises(ConfigError):
+        HarnessSettings().resolve_provider()
+
+
+def test_custom_base_url_with_explicit_placeholder_is_allowed(config_file, monkeypatch):
+    config_file.write_text(
+        "llm:\n  active: gateway\n  providers:\n    gateway:\n      adapter: openai\n"
+        "      base_url: http://localhost:8000/v1\n      api_key: ${OPENAI_API_KEY}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-official")
+
+    resolved = HarnessSettings().resolve_provider()
+
+    assert resolved.base_url == "http://localhost:8000/v1"
+    assert resolved.api_key == "sk-official"
+
+
+def test_invalid_logging_level_is_rejected(config_file):
+    config_file.write_text("logging:\n  level: LOUD\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+def test_empty_database_path_is_rejected(config_file):
+    config_file.write_text("database:\n  path: \"\"\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+def test_workspace_path_resolves_against_project_root(config_file):
+    config_file.write_text("workspace:\n  path: ./workspace\n", encoding="utf-8")
+
+    assert HarnessSettings().workspace_path() == (PROJECT_ROOT / "workspace").resolve()

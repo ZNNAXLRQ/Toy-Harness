@@ -4,8 +4,15 @@
 prefix 一旦被裁，供应商的 prefix cache 每轮都失效——两个「高级功能」会互相
 拆台。``prepare`` 因此把两者分开返回，而不是返回一个混合列表。
 
-摘要（summarizer）用来在裁剪前压掉中段历史；摘要结果必须写回会话（作为一条
-``role="summary"`` 或系统注记），否则下一轮无法复现同一上下文。
+## 摘要写回（不要再让实现私接 StateStore）
+
+早期版本写「摘要结果必须写回会话」，但没有给通道，实现者只能自己偷偷连库。
+现在明确：摘要由 ``build_summary`` **生成并返回文本**，由 loop 负责
+``append_message(role=SUMMARY, ...)``。这样写入顺序、事务边界、恢复规则都只有一个
+负责人（loop），ContextManager 保持纯计算。
+
+摘要消息是压缩注记，不构成一轮的开始/结束：恢复推导会跳过尾部的 summary/system
+再判断轮次状态（见 ``state_store`` 的规则）。
 """
 
 from dataclasses import dataclass
@@ -20,7 +27,7 @@ class PreparedContext:
     messages: Sequence[Mapping[str, Any]]
     estimated_tokens: int
     trimmed_messages: int = 0
-    summarized: bool = False
+    needs_summary: bool = False
 
 
 class ContextManager(Protocol):
@@ -32,7 +39,13 @@ class ContextManager(Protocol):
         *,
         budget: int | None = None,
     ) -> PreparedContext:
-        """按预算裁剪尾部并估算 token；prefix 原样返回。"""
+        """按预算裁剪尾部并估算 token；prefix 原样返回，不裁不改。"""
+        ...
+
+    async def build_summary(
+        self, session_id: str, messages: Sequence[Mapping[str, Any]]
+    ) -> str:
+        """生成中段历史的摘要文本；**不写库**，由 loop 以 role=summary 追加。"""
         ...
 
     def record_usage(self, tokens: int) -> None:

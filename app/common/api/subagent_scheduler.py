@@ -8,8 +8,12 @@
 3. **预算独立**：子代理有自己的 token 预算，用尽即失败并回报，不能无限制消耗
    父会话的额度。
 
-子代理的对话过程不保证完整落库（schema 无 parent 列）；落库的是 ``subagent_runs``
-里的任务摘要与结果，工具调用仍记在父会话审计下。
+## 运行记录与恢复
+
+``subagent_runs`` 是运行状态的**唯一记录**。执行前先落 ``running``，结束后更新为
+终态；进程崩溃时遗留的 ``running`` 行在恢复时由调度器判为 ``unknown``（与 tool_call
+的 UNKNOWN 同构），**不自动重试**——子代理可能已经产生了外部副作用。
+``running()`` 的返回必须能从 ``SubagentRunView`` 重建，不能只存在于内存。
 """
 
 from dataclasses import dataclass, field
@@ -39,9 +43,8 @@ class SubagentResult:
     detail: Mapping[str, Any] | None = None
 
 
-@dataclass(frozen=True)
-class SubagentRunRecord:
-    """``subagent_runs`` 表的一行（C 的 schema）。"""
+class SubagentRunView(Protocol):
+    """``subagent_runs`` 表的一行（C 的 dataclass 自动满足）。"""
 
     id: str
     session_id: str
@@ -56,18 +59,26 @@ class SubagentRunStore(Protocol):
     """子代理运行的持久化端口（C 实现，A 的 ``SubagentScheduler`` 消费）。
 
     没有它，调度器只能把运行状态留在内存里：重启后 UI 看不到「有个子代理曾经在跑」，
-    也无法判断它是完成、失败还是未知（对应 ``subagent_runs`` 表的三列）。
+    也无法判断它是完成、失败还是未知。
     """
 
-    async def save_run(self, record: SubagentRunRecord) -> SubagentRunRecord: ...
+    async def save_run(
+        self,
+        run_id: str,
+        session_id: str,
+        *,
+        parent_task_id: str | None = None,
+        status: str = "running",
+        context_json: str | None = None,
+    ) -> SubagentRunView: ...
 
     async def update_run(
-        self, run_id: str, *, status: str, result_json: str | None
-    ) -> SubagentRunRecord: ...
+        self, run_id: str, *, status: str, result_json: str | None = None
+    ) -> SubagentRunView: ...
 
-    async def load_run(self, run_id: str) -> SubagentRunRecord | None: ...
+    async def load_run(self, run_id: str) -> SubagentRunView | None: ...
 
-    async def list_runs(self, session_id: str) -> Sequence[SubagentRunRecord]: ...
+    async def list_runs(self, session_id: str) -> Sequence[SubagentRunView]: ...
 
 
 class SubagentScheduler(Protocol):
@@ -80,8 +91,8 @@ class SubagentScheduler(Protocol):
         """
         ...
 
-    async def running(self, session_id: str) -> Sequence[SubagentTask]:
-        """当前仍在运行的子任务，用于 UI 显示和取消。"""
+    async def running(self, session_id: str) -> Sequence[SubagentRunView]:
+        """当前仍在运行（或崩溃后判为 unknown 待确认）的子任务。"""
         ...
 
     async def cancel(self, run_id: str) -> None: ...
