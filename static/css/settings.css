@@ -61,9 +61,14 @@ nav a { display: flex; align-items: center; gap: 9px; padding: 8px 12px; min-hei
 nav a:hover, nav a[aria-current] { background: var(--neutral); color: #273345; }
 nav a[aria-current] { font-weight: 750; }
 .nav-icon { width: 15px; flex: none; text-align: center; }
-.nav-divider { margin: clamp(12px, 6vh, 50px) 4px 0; border-top: 1px solid var(--line); padding-top: 17px; }
 .sidebar-foot { margin-top: auto; padding: 7px; border: 1px solid var(--line); border-radius: 14px; background: var(--subtle); font-size: 12px; }
 .sidebar-foot small { display: block; color: var(--muted); }
+.history-nav { max-height: 12rem; overflow-y: auto; padding: 4px; }
+.history-nav a { overflow-wrap: anywhere; }
+.task-nav { border-top: 1px solid var(--line); margin: 8px 0; padding-top: 8px; }
+.sidebar-foot { text-decoration: none; color: inherit; }
+.sidebar-foot:hover, .sidebar-foot[aria-current] { background: var(--neutral); }
+[role="tab"][aria-selected="true"] { background: var(--primary); color: #fff; }
 .masthead { min-height: 69px; padding: 8px 12px 8px 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .masthead p, .meta { color: var(--muted); font-size: 12px; }
 .masthead p { margin-top: 3px; }
@@ -124,9 +129,9 @@ dialog[data-variant="approval"] .dialog-actions { margin-top: 36px; }
 @media (max-width: 650px) {
   body { display: block; border: 0; padding: 10px; }
   .sidebar { position: static; min-height: auto; margin-bottom: 12px; padding: 10px; }
-  .nav-label, .sidebar-foot { display: none; }
+  .sidebar-foot { margin-top: 8px; }
   .new-link { align-self: start; width: auto; margin: 8px 0; }
-  nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .task-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   nav a { padding: 5px; gap: 3px; min-height: 34px; font-size: 12px; overflow-wrap: anywhere; }
   .masthead { flex-wrap: wrap; }
   .header-tools { justify-content: start; }

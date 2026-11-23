@@ -13,10 +13,10 @@
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
     <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
-    <p class="nav-label">代理工作空间</p>
+    <p class="nav-label" id="workspace-name">演示工作区</p>
     <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
-    <nav aria-label="工作台导航">
-      <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
+    <nav class="history-nav" aria-label="工作区会话历史" id="session-history"></nav>
+    <nav class="task-nav" aria-label="工作台导航">
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
       <a href="sessions.html"><span class="nav-icon" aria-hidden="true">▤</span>会话与恢复</a>
       <a href="checkpoints.html"><span class="nav-icon" aria-hidden="true">↶</span>检查点与回滚</a>
@@ -24,10 +24,8 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html" aria-current="page"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
-      <p class="nav-label nav-divider">工作区</p>
-      <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
+    <a class="sidebar-foot" href="settings.html" aria-label="演示用户设置"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></a>
   </aside>
   <main id="main" tabindex="-1">
     <header class="masthead">
@@ -46,7 +44,7 @@
           <p class="meta">只读历史 · 最新记录在前</p>
           <div class="filters">
             <label class="field grow" for="audit-search"><span class="sr-only">搜索审计</span><input id="audit-search" type="search" placeholder="搜索操作者、动作或会话"></label>
-            <label class="field" for="audit-scope"><span class="sr-only">会话范围</span><select id="audit-scope"><option value="current">当前会话</option><option value="all">所有会话</option></select></label>
+            <label class="field" for="audit-scope"><span class="sr-only">会话范围</span><select id="audit-scope"><option value="all">全部会话</option><option value="current">当前会话</option></select></label>
             <label class="field" for="audit-action"><span class="sr-only">动作</span><select id="audit-action"></select></label>
           </div>
           <table class="record-table audit-table" aria-labelledby="audit-title">

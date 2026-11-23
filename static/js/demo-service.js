@@ -3,6 +3,7 @@ const EPOCH = 1767607200;
 const ACTOR = 'demo-user';
 const NOTE_TOOL = 'demo_note';
 const CONTEXT_HISTORY_LIMIT = 8;
+const workspace = { id: 'demo-workspace', title: '演示工作区' };
 const tools = [
   { name: 'demo_read', description: '查看示例便笺文本（目录条目，不可运行）。', parameters: { type: 'object', properties: {} } },
   { name: NOTE_TOOL, description: '模拟更新内存便笺；需要审批，并支持检查点补偿。', parameters: {
@@ -251,12 +252,18 @@ export function createDemoService({ snapshot, save } = {}) {
 
   return {
     mode: 'demo',
+    // A single fixture workspace owns this tab's sessions, not a filesystem path.
+    async listWorkspaces() {
+      return structuredClone([{ ...workspace, sessions: [...sessions.values()].map(({ row }) => row) }]);
+    },
     async listSessions() { return structuredClone([...sessions.values()].map(({ row }) => row)); },
     async createSession(title) { return commit(addSession(title?.trim() || '新会话').row); },
     async getSession(id) {
       const s = session(id);
       return structuredClone({ session: s.row, messages: s.messages, tool_calls: s.tool_calls, approvals: s.approvals,
-        turn: s.turn, outcome: s.outcome, events: s.events, checkpoints: s.checkpoints, subagents: s.subagents,
+        turn: s.turn, outcome: s.outcome, events: s.events, checkpoints: s.checkpoints,
+        subagents: s.subagents.map((run) => ({ ...run, created_at: s.events.find((event) =>
+          event.type === 'subagent_started' && event.payload.run_id === run.task.id)?.created_at })),
         agents_document: documentFixture, context: prepareContext(s),
         demo: { note: s.note, rollback: s.rollback } });
     },

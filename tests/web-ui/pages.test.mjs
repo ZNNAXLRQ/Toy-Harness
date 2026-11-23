@@ -20,9 +20,14 @@ test('each HTML document owns one stylesheet and works as a static navigation ta
     assert.deepEqual(stylesheets, [`<link rel="stylesheet" href="../css/${page}.css">`]);
     assert.equal((html.match(/<script\b/gi) ?? []).length, 1);
     assert.match(html, /<script type="module" src="\.\.\/js\/app\.js"><\/script>/);
-    const nav = html.match(/<nav\b[^>]*>([\s\S]+?)<\/nav>/)[1];
-    assert.deepEqual([...nav.matchAll(/<a href="([^"#]+)"/g)].map(([, href]) => href), pages.map((name) => `${name}.html`));
-    assert.equal((nav.match(/aria-current=/g) ?? []).length, 1);
-    assert.ok(nav.includes(`href="${page}.html" aria-current="page"`));
+    assert.match(html, /<nav\b[^>]*id="session-history"><\/nav>/);
+    assert.match(html, /class="button primary new-link" href="sessions.html#new-session"/);
+    const nav = html.match(/<nav class="task-nav"[^>]*>([\s\S]+?)<\/nav>/)[1];
+    const taskPages = pages.filter((name) => !['index', 'settings'].includes(name));
+    assert.deepEqual([...nav.matchAll(/<a href="([^"#]+)"/g)].map(([, href]) => href), taskPages.map((name) => `${name}.html`));
+    assert.equal((nav.match(/aria-current=/g) ?? []).length, Number(taskPages.includes(page)));
+    if (taskPages.includes(page)) assert.ok(nav.includes(`href="${page}.html" aria-current="page"`));
+    assert.equal((html.match(/href="settings\.html"/g) ?? []).length, 1);
+    assert.match(html, /<a class="sidebar-foot" href="settings\.html"/);
   }
 });

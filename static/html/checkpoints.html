@@ -13,10 +13,10 @@
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
     <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
-    <p class="nav-label">代理工作空间</p>
+    <p class="nav-label" id="workspace-name">演示工作区</p>
     <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
-    <nav aria-label="工作台导航">
-      <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
+    <nav class="history-nav" aria-label="工作区会话历史" id="session-history"></nav>
+    <nav class="task-nav" aria-label="工作台导航">
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
       <a href="sessions.html"><span class="nav-icon" aria-hidden="true">▤</span>会话与恢复</a>
       <a href="checkpoints.html" aria-current="page"><span class="nav-icon" aria-hidden="true">↶</span>检查点与回滚</a>
@@ -24,10 +24,8 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
-      <p class="nav-label nav-divider">工作区</p>
-      <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
+    <a class="sidebar-foot" href="settings.html" aria-label="演示用户设置"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></a>
   </aside>
   <main id="main" tabindex="-1">
     <header class="masthead">
@@ -43,7 +41,9 @@
       <div id="page" data-page="checkpoints" aria-busy="true" hidden>
         <div class="grid checkpoint-grid">
           <section class="card panel" aria-labelledby="checkpoints-title">
-            <div class="section-head"><div><h2 id="checkpoints-title">会话检查点</h2><p class="meta">此会话的快照 · 最新在前</p></div><span id="checkpoint-count" class="badge"></span></div>
+            <div class="section-head"><div><h2 id="checkpoints-title">会话检查点</h2><p class="meta">按创建时间倒序</p></div><span id="checkpoint-count" class="badge"></span></div>
+            <label class="field scope-field">会话范围<select id="checkpoint-scope"><option value="all">全部会话</option><option value="current">当前会话</option></select></label>
+            <p class="meta">创建于当前会话：<span id="checkpoint-session"></span></p>
             <form id="checkpoint-form" class="filters">
               <label class="field grow" for="checkpoint-description">检查点说明<input id="checkpoint-description" maxlength="100" placeholder="例如：变更前（可选）"></label>
               <button type="submit" class="primary" data-focus="new-checkpoint">创建检查点</button>
@@ -57,12 +57,12 @@
             <div class="stack">
               <label class="field" for="rollback-target">目标检查点<select id="rollback-target"></select></label>
               <button type="button" class="primary" id="rollback-review" data-focus="rollback-review">审阅并恢复检查点</button>
-              <p id="rollback-blocked" class="notice" hidden>当前轮次未结束，暂不能回滚。</p>
+              <p id="rollback-blocked" class="notice" hidden>目标会话的轮次未结束，暂不能回滚。</p>
               <div id="rollback-result"></div>
             </div>
           </section>
           <section class="card panel warning-panel" aria-labelledby="workspace-title">
-            <h2 id="workspace-title">模拟工作区</h2>
+            <h2 id="workspace-title">当前会话的模拟便笺与调用</h2>
             <div class="stack">
               <p class="notice">演示便笺仅保存在此标签页。回滚按逆序补偿，不重写历史。</p>
               <pre id="note"></pre>
