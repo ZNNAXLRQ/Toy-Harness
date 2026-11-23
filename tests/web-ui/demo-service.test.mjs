@@ -72,20 +72,34 @@ test('approval is bound to its call; decision and audit precede dispatch during 
   assert.equal(JSON.parse(observation.content).status, 'success');
 });
 
-test('rejecting never dispatches and stores a denied observation without receipt', async () => {
+test('rejecting completes without dispatch or another model response', async () => {
   const service = createDemoService();
   const [, row] = await service.listSessions();
   const initial = await service.getSession(row.id);
   const approval = pending(initial);
   await service.decide(row.id, approval.id, 'denied');
-  await service.resume(row.id, approval.id);
+  const outcome = await service.resume(row.id, approval.id);
   const snapshot = await service.getSession(row.id);
   assert.equal(snapshot.session.status, 'completed');
   assert.equal(snapshot.tool_calls[0].status, 'denied');
   assert.equal(snapshot.tool_calls[0].reversible, false);
-  assert.ok(snapshot.events.some(({ type }) => type === 'tool_skipped'));
-  assert.ok(snapshot.events.every(({ type }) => !['tool_start', 'tool_end'].includes(type)));
-  assert.equal(JSON.parse(snapshot.messages.find(({ role }) => role === 'tool').content).receipt, null);
+  const events = snapshot.events.slice(initial.events.length);
+  assert.deepEqual(events.map(({ type }) => type), ['approval_decided', 'tool_skipped', 'turn_completed']);
+  assert.equal(outcome.status, 'completed');
+  assert.match(outcome.content, /已拒绝/);
+  assert.equal(outcome.pending_call_id, null);
+  assert.equal(outcome.iterations, initial.outcome.iterations);
+  assert.equal(outcome.tokens, initial.outcome.tokens);
+  assert.deepEqual(snapshot.outcome, outcome);
+  assert.equal(snapshot.turn, null);
+  assert.deepEqual(events.at(-1).payload, outcome);
+  const addedMessages = snapshot.messages.slice(initial.messages.length);
+  assert.equal(addedMessages.length, 1);
+  const [observation] = addedMessages;
+  assert.equal(observation.role, 'tool');
+  assert.equal(observation.tool_call_id, approval.call_id);
+  assert.equal(JSON.parse(observation.content).status, 'denied');
+  assert.equal(JSON.parse(observation.content).receipt, null);
   assert.equal(snapshot.demo.note, initial.demo.note);
 });
 
@@ -156,4 +170,34 @@ test('read-only queries return detached contract records and context trims only 
   assert.equal(after.context.trimmed_messages, 4);
   after.messages[0].content = 'mutated';
   assert.equal((await service.getSession(row.id)).messages[0].content, snapshot.messages[0].content);
+});
+
+test('context reconstructs assistant tool calls and keeps their observations together at the trim boundary', async () => {
+  const service = createDemoService();
+  const [, row] = await service.listSessions();
+  const initial = await service.getSession(row.id);
+  const approval = pending(initial);
+  const [call] = initial.tool_calls;
+  const [requester, ...otherMessages] = initial.messages.filter(({ role }) => role === 'assistant');
+  assert.equal(otherMessages.length, 0);
+  assert.equal(requester.id, call.message_id);
+  const projectedRequest = { role: 'assistant', content: requester.content, tool_calls: [{
+    id: call.id, type: 'function', function: { name: call.tool_name, arguments: call.arguments },
+  }] };
+  assert.deepEqual(initial.context.messages.at(-1), projectedRequest);
+
+  await service.decide(row.id, approval.id, 'approved');
+  await service.resume(row.id, approval.id);
+  const untrimmed = await service.getSession(row.id);
+  const observation = untrimmed.messages[2];
+  const projectedObservation = { role: 'tool', content: observation.content, tool_call_id: call.id };
+  assert.deepEqual(untrimmed.context.messages.slice(1, 3), [projectedRequest, projectedObservation]);
+  assert.equal(untrimmed.context.trimmed_messages, 0);
+
+  for (let i = 0; i < 3; i++) await service.send(row.id, `普通消息 ${i}`);
+  const trimmed = await service.getSession(row.id);
+  assert.equal(trimmed.messages.at(-8).tool_call_id, call.id);
+  assert.deepEqual(trimmed.context.prefix, initial.context.prefix);
+  assert.equal(trimmed.context.trimmed_messages, 3);
+  assert.deepEqual(trimmed.context.messages, trimmed.messages.slice(3).map(({ role, content }) => ({ role, content })));
 });

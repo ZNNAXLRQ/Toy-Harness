@@ -2,6 +2,7 @@
 const EPOCH = 1767607200;
 const ACTOR = 'demo-user';
 const NOTE_TOOL = 'demo_note';
+const CONTEXT_HISTORY_LIMIT = 8;
 const tools = [
   { name: 'demo_read', description: '查看示例便笺文本（目录条目，不可运行）。', parameters: { type: 'object', properties: {} } },
   { name: NOTE_TOOL, description: '模拟更新内存便笺；需要审批，并支持检查点补偿。', parameters: {
@@ -15,6 +16,32 @@ const documentFixture = {
   version: 'demo-agents-v1', source: 'example/AGENTS.md', skills: ['demo-review'],
   content: '# 示例工作区\n仅查看示例资料。模拟写入必须经人工审批。',
 };
+
+function prepareContext({ prefix, messages, tool_calls }) {
+  const callsByMessage = new Map();
+  for (const call of tool_calls) {
+    const calls = callsByMessage.get(call.message_id) ?? [];
+    calls.push({ id: call.id, type: 'function', function: { name: call.tool_name, arguments: call.arguments } });
+    callsByMessage.set(call.message_id, calls);
+  }
+  const requestIndexByCall = new Map();
+  const history = messages.map(({ id, role, content, tool_call_id }, index) => {
+    const calls = role === 'assistant' ? callsByMessage.get(id) : undefined;
+    for (const call of calls ?? []) requestIndexByCall.set(call.id, index);
+    return { role, content, ...(tool_call_id ? { tool_call_id } : {}), ...(calls ? { tool_calls: calls } : {}) };
+  });
+
+  let start = Math.max(0, history.length - CONTEXT_HISTORY_LIMIT);
+  // Keep the newest suffix within the limit; if the cut splits a call group,
+  // advance past its observations rather than including an orphaned tool message.
+  for (let i = start; i < history.length; i++) {
+    const { role, tool_call_id } = history[i];
+    if (role === 'tool' && (requestIndexByCall.get(tool_call_id) ?? -1) < start) start = i + 1;
+  }
+  const recent = history.slice(start);
+  const estimated_tokens = Math.ceil(JSON.stringify([...prefix, ...recent]).length / 4);
+  return { prefix, messages: recent, estimated_tokens, trimmed_messages: start, summarized: false };
+}
 
 export function createDemoService() {
   const sessions = new Map();
@@ -93,11 +120,14 @@ export function createDemoService() {
     append(state, 'user', content);
     publish(state, 'user_message', { content });
   }
-  function complete(state, content) {
-    model(state, content);
+  function finishTurn(state, content) {
     const outcome = setOutcome(state, 'completed', content);
     publish(state, 'turn_completed', outcome);
     return outcome;
+  }
+  function complete(state, content) {
+    model(state, content);
+    return finishTurn(state, content);
   }
   function checkpoint(state, description = null) {
     const row = { id: uid('cp'), session_id: state.row.id, seq: lastSeq(state), description, created_at: now() };
@@ -162,7 +192,8 @@ export function createDemoService() {
     state.observations.push({ call_id: call.id, seq: message.seq, ...observation });
     Object.assign(call, { status: approved ? 'completed' : 'denied', reversible: approved });
     publish(state, approved ? 'tool_end' : 'tool_skipped', { call_id: call.id, status: observation.status, result: observation.result });
-    return complete(state, approved ? '便笺已在演示内存中更新。可到检查点页模拟撤销。' : '已拒绝，示例便笺没有改变。');
+    if (!approved) return finishTurn(state, '已拒绝，示例便笺没有改变。');
+    return complete(state, '便笺已在演示内存中更新。可到检查点页模拟撤销。');
   }
   function rollback(state, checkpointId) {
     const point = state.checkpoints.find(({ id }) => id === checkpointId);
@@ -211,15 +242,9 @@ export function createDemoService() {
     async createSession(title) { return structuredClone(addSession(title?.trim() || '新会话').row); },
     async getSession(id) {
       const s = session(id);
-      const messages = s.messages.map(({ role, content, tool_call_id }) => ({ role, content,
-        ...(tool_call_id ? { tool_call_id } : {}) }));
-      const limit = 8;
-      const recent = messages.slice(-limit);
-      const estimated_tokens = Math.ceil(JSON.stringify([...s.prefix, ...recent]).length / 4);
       return structuredClone({ session: s.row, messages: s.messages, tool_calls: s.tool_calls, approvals: s.approvals,
         turn: s.turn, outcome: s.outcome, events: s.events, checkpoints: s.checkpoints, subagents: s.subagents,
-        agents_document: documentFixture, context: { prefix: s.prefix, messages: recent, estimated_tokens,
-          trimmed_messages: messages.length - recent.length, summarized: false },
+        agents_document: documentFixture, context: prepareContext(s),
         demo: { note: s.note, rollback: s.rollback } });
     },
     subscribe(id, listener) {
