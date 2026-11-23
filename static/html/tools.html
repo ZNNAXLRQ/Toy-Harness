@@ -12,8 +12,9 @@
 <body>
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
-    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
-    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
+    <p class="nav-label">代理工作空间</p>
+    <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
     <nav aria-label="工作台导航">
       <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
@@ -23,28 +24,37 @@
       <a href="tools.html" aria-current="page"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <p class="nav-label nav-divider">工作区</p>
       <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
   </aside>
   <main id="main" tabindex="-1">
-    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>工具目录</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <header class="masthead">
+      <div><h1 id="page-title" tabindex="-1">只读工具目录</h1><p>检查工具描述与参数 Schema；此处不能运行或注册工具。</p></div>
+      <div class="header-tools"><label class="workspace" for="session-select"><span class="sr-only">当前会话</span><select id="session-select" disabled><option>加载中…</option></select></label><span class="badge mode">示例模式</span><span class="avatar" aria-hidden="true">U</span></div>
+    </header>
     <div class="content">
-      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">只读工具目录</h1><p>检查工具描述与参数 Schema；此处不能运行或注册工具。</p></header>
       <div id="error" class="notice error" role="alert" hidden></div>
       <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
       <div id="status" class="sr-only" role="status"></div>
       <p id="loading" class="empty">正在加载本地演示…</p>
       <button type="button" id="retry" hidden>重试</button>
       <div id="page" data-page="tools" aria-busy="true" hidden>
-        <section class="card panel" aria-labelledby="tools-title">
+        <section class="card panel full-panel" aria-labelledby="tools-title">
           <h2 id="tools-title">已注册的示例工具</h2>
-          <div class="filters"><label class="field grow" for="tool-search">搜索工具<input id="tool-search" type="search" placeholder="名称或描述"></label></div>
-          <div id="tool-list" class="stack"></div>
+          <p class="meta">查看目录中的用途和实际演示行为；目录不提供工具执行。</p>
+          <div class="filters"><label class="field grow" for="tool-search"><span class="sr-only">搜索工具</span><input id="tool-search" type="search" placeholder="搜索工具名称或描述"></label></div>
+          <table class="record-table tools-table" aria-labelledby="tools-title">
+            <thead><tr><th scope="col">工具</th><th scope="col">用途</th><th scope="col">审批</th><th scope="col">状态</th><th scope="col">参数</th></tr></thead>
+            <tbody id="tool-list"></tbody>
+          </table>
+          <p class="panel-foot meta">演示规则：模拟更新便笺需要审批，批准后仍需手动恢复轮次。</p>
         </section>
       </div>
       <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
     </div>
+    <footer>本地演示 · 不连接后端</footer>
   </main>
 </body>
 </html>

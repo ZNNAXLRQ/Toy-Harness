@@ -109,14 +109,40 @@ test('browser: direct pages, cross-page approval and recovery, checkpoint and ta
   const main = client(await tab());
   const targets = {
     index: ['#chat-stream', '工作区'], approvals: ['#approval-list', '没有符合'], sessions: ['#session-list', '便笺更新'],
-    checkpoints: ['#note', '初始版本'], subagents: ['#subagent-list', '已汇总'], tools: ['#tool-list', 'demo_note'],
+    checkpoints: ['#note', '初始版本'], subagents: ['#subagent-results', '已汇总'], tools: ['#tool-list', 'demo_note'],
     audit: ['#audit-list', '创建会话'], context: ['#context-summary', '前缀哈希'], settings: ['#runtime-config', '8080'],
   };
   for (const [page, [selector, expected]] of Object.entries(targets)) {
     await main.open(page);
     assert.ok((await main.text(selector)).includes(expected), `${page}: ${await main.text(selector)}`);
     assert.deepEqual(await main.evaluate('[...document.styleSheets].map(s => new URL(s.href).pathname)'), [`/css/${page}.css`]);
+    await main.run('Emulation.setDeviceMetricsOverride', { width: 320, height: 820, deviceScaleFactor: 1, mobile: false });
+    assert.equal(await main.evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `${page} fits at 320px`);
+    await main.run('Emulation.clearDeviceMetricsOverride');
   }
+
+  const filter = (selector, value, event = 'input') => main.evaluate(`{
+    const field = document.querySelector(${JSON.stringify(selector)});
+    field.value = ${JSON.stringify(value)}; field.dispatchEvent(new Event(${JSON.stringify(event)}));
+  }`);
+  await main.go('sessions');
+  assert.equal(await main.evaluate('document.querySelectorAll("#session-list > tr").length'), 3);
+  await filter('#session-filter', 'open', 'change');
+  assert.match(await main.text('#session-list'), /中断恢复示例/);
+  assert.doesNotMatch(await main.text('#session-list'), /便笺更新/);
+  await filter('#session-search', 'not found');
+  assert.match(await main.text('#session-list'), /没有符合/);
+  await main.go('tools');
+  await filter('#tool-search', 'demo_note');
+  assert.equal(await main.evaluate('document.querySelectorAll("#tool-list > tr").length'), 1);
+  assert.doesNotMatch(await main.text('#tool-list'), /demo_read/);
+  await main.go('audit');
+  await filter('#audit-scope', 'all', 'change');
+  await main.waitText('#audit-list', '启动子代理');
+  await filter('#audit-action', 'session_created', 'change');
+  assert.equal(await main.evaluate('document.querySelectorAll("#audit-list > tr").length'), 3);
+  await filter('#audit-search', '便笺更新');
+  assert.equal(await main.evaluate('document.querySelectorAll("#audit-list > tr").length'), 1);
 
   await main.go('approvals');
   await main.evaluate(`const select = document.querySelector('#session-select');
@@ -125,6 +151,12 @@ test('browser: direct pages, cross-page approval and recovery, checkpoint and ta
   const selected = await main.evaluate('document.querySelector("#session-select").value');
   await main.click('#approval-list button');
   assert.equal(await main.evaluate('document.querySelector("dialog").open'), true);
+  assert.equal(await main.evaluate('document.activeElement.id'), 'dialog-close');
+  await main.run('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', modifiers: 8, windowsVirtualKeyCode: 9 });
+  assert.equal(await main.evaluate('document.activeElement.matches("#dialog-actions .primary")'), true);
+  await main.run('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+  await until(() => main.evaluate('!document.querySelector("dialog").open && document.activeElement.matches("#approval-list button")'), 'Escape restores focus');
+  await main.click('#approval-list button');
   await main.click('dialog button.primary');
   await main.waitText('#approval-list', '已批准');
   await main.go('checkpoints');
@@ -136,7 +168,7 @@ test('browser: direct pages, cross-page approval and recovery, checkpoint and ta
   await main.waitText('#session-summary', '已完成');
   await main.go('checkpoints');
   assert.match(await main.text('#note'), /便笺已更新/);
-  await main.click('#checkpoint-list button');
+  await main.click('#rollback-review');
   await main.click('dialog button.danger');
   await main.waitText('#rollback-result', '最近一次回滚');
   assert.match(await main.text('#note'), /初始版本/);
@@ -173,6 +205,14 @@ test('browser: direct pages, cross-page approval and recovery, checkpoint and ta
     document.querySelector('#session-select').dispatchEvent(new Event('change'));`);
   await other.waitText('#approval-list', '待决定');
   assert.equal(await main.evaluate('document.querySelector("#session-select").selectedIndex'), 0);
+  await other.go('context');
+  await other.evaluate(`document.querySelector('#session-select').selectedIndex = 2;
+    document.querySelector('#session-select').dispatchEvent(new Event('change'));`);
+  await other.waitText('#context-session', '中断恢复示例');
+  await other.click('[data-focus="resume"]');
+  await other.waitText('#turn-summary', '已完成');
+  await other.go('index');
+  assert.match(await other.text('#chat-stream'), /已恢复这条未完成的演示轮次/);
   assert.deepEqual(exceptions, []);
   assert.ok(requests.length > 9);
   for (const { url, method } of requests) {

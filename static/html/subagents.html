@@ -12,8 +12,9 @@
 <body>
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
-    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
-    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
+    <p class="nav-label">代理工作空间</p>
+    <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
     <nav aria-label="工作台导航">
       <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
@@ -23,24 +24,38 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <p class="nav-label nav-divider">工作区</p>
       <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
   </aside>
   <main id="main" tabindex="-1">
-    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>子代理</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <header class="masthead">
+      <div><h1 id="page-title" tabindex="-1">子代理进度</h1><p>查看父会话中的运行任务、工具白名单与结果摘要。</p></div>
+      <div class="header-tools"><label class="workspace" for="session-select"><span class="sr-only">当前会话</span><select id="session-select" disabled><option>加载中…</option></select></label><span class="badge mode">示例模式</span><span class="avatar" aria-hidden="true">U</span></div>
+    </header>
     <div class="content">
-      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">子代理进度</h1><p>查看父会话中的运行任务、工具白名单与结果摘要。</p></header>
       <div id="error" class="notice error" role="alert" hidden></div>
       <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
       <div id="status" class="sr-only" role="status"></div>
       <p id="loading" class="empty">正在加载本地演示…</p>
       <button type="button" id="retry" hidden>重试</button>
       <div id="page" data-page="subagents" aria-busy="true" hidden>
-        <section class="card panel" aria-labelledby="tasks-title"><h2 id="tasks-title">当前会话的子代理任务</h2><div id="subagent-list" class="stack"></div></section>
+        <div class="grid delegation-grid">
+          <section class="card panel" aria-labelledby="tasks-title">
+            <div class="section-head"><div><h2 id="tasks-title">委派树</h2><p class="meta">当前会话的子代理任务</p></div><span id="subagent-count" class="badge"></span></div>
+            <div id="subagent-parent" class="inset"></div>
+            <div id="subagent-list" class="stack"></div>
+          </section>
+          <div class="stack side-panels">
+            <section class="card panel" aria-labelledby="subagent-detail-title"><h2 id="subagent-detail-title" tabindex="-1">所选子代理</h2><div id="subagent-detail"></div></section>
+            <section class="card panel" aria-labelledby="subagent-results-title"><h2 id="subagent-results-title">结果摘要</h2><p class="meta">已返回的演示任务结果</p><div id="subagent-results" class="stack"></div></section>
+          </div>
+        </div>
       </div>
       <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
     </div>
+    <footer>本地演示 · 不连接后端</footer>
   </main>
 </body>
 </html>
