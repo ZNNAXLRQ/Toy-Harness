@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Toy Harness · 演示工作台</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../css/index.css">
+  <script type="module" src="../js/app.mjs"></script>
+</head>
+<body>
+  <a href="#main" class="skip" id="skip">跳至主要内容</a>
+  <aside class="sidebar">
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
+    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <nav id="nav" aria-label="工作台导航"></nav>
+    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong id="breadcrumb">聊天</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <div class="content">
+      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">聊天与实时事件</h1><p id="page-description"></p></header>
+      <div id="error" class="notice error" role="alert" hidden></div>
+      <div id="status" class="sr-only" role="status"></div>
+      <div id="page" aria-busy="true"><p class="empty">正在加载本地演示…</p></div>
+      <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
+    </div>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+    <header class="dialog-head"><h2 id="dialog-title"></h2><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
+    <p id="dialog-description"></p>
+    <div id="dialog-body"></div>
+    <p id="dialog-error" class="notice error" role="alert" hidden></p>
+    <div id="dialog-actions" class="actions dialog-actions"></div>
+  </dialog>
+</body>
+</html>
