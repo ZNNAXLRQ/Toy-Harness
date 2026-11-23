@@ -13,6 +13,25 @@ uv sync          # 创建 .venv，按 uv.lock 安装运行依赖与开发依赖
 
 `uv run` 会自动使用 `.venv`，不需要手动激活。
 
+## 本机 Harness HTTP 入口
+
+从仓库根目录运行（`--workspace` 必须指向已存在且可供读取的目录）：
+
+```powershell
+uv run python -m app.web --workspace "C:\path\to\readable-workspace" --offline
+```
+
+该入口监听 `127.0.0.1:8080`（可用 `--port` 修改）。省略 `--offline` 时，沿用 CLI Provider 的 `OPENAI_API_KEY` 和 `BASE_URL` 环境变量或仓库根目录 `.env`；`--offline` 使用每轮新建的 FakeProvider，执行一次真实的工作区列表读取并返回脚本化回复，不访问模型服务。不要把仓库根目录、存有凭据的目录或非信任方可修改的目录作为工作区；读取和脱敏不等于操作系统隔离。不要将入口代理暴露到公网。
+
+- `/` 跳转至 `/html/index.html`；只挂载现有的 `/html`、`/css`、`/js`。静态页面仍是独立的演示模式，尚未调用下列 HTTP API。
+- `GET /api/runtime` 返回 Provider 模式及单轮、只读、事件随结果返回的能力；`GET /api/tools` 从实际注册表返回工具 `schema` 和 `enabled`，只有 `read_file`、`list_files` 可执行。
+- `POST /api/runs` 仅接受 `application/json` 和 `{"prompt":"…"}`（去掉首尾空白后 1–8192 字符）；不接受查询参数、工作区覆盖、密钥或模型端点配置。浏览器请求限同源；本机命令行客户端可不发送 `Origin`。
+- 每轮返回 `result`（运行 ID、成败、最终答复、统计及错误代码）和本轮已产生的脱敏 `events` 摘要；不包含原始历史、工具输入输出或内部诊断。这不是实时流，也不支持恢复 CLI 或 Web 会话。出错时只提供稳定代码：`tool_denied`（403）、`run_failed`（502）随本轮结果返回；校验失败（422）、Provider 初始化失败（503）和入口内部失败（500）等在未能返回轮次结果时只提供顶层 `error`。
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8080/api/runs -Method Post -ContentType application/json -Body '{"prompt":"List my workspace"}'
+```
+
 ## Web UI 本地预览（示例模式）
 
 从仓库根目录运行：
@@ -55,4 +74,4 @@ node --test tests/web-ui
 
 ### 将来接入 REST / SSE
 
-在 `static/js/service.js` 的装配点换掉演示适配器，保留异步查询、命令，以及 `subscribe(sessionId, listener) → unsubscribe` 的 UI 接口。`getSession` 是 UI 的聚合快照，不是宣称已存在的 HTTP 路径；应按最终 Web 契约取会话、消息、工具调用、审批等权威记录，同步后再接收该会话的 SSE 事件。断线、重复投递或切换会话时按权威快照校准、关闭旧订阅；不要把 SSE 内容当成持久状态，也不要把同一 `seq` 的不同事件视为重复。审批决定和恢复应继续分开，恢复时传入审批 ID。`demo.note` 是纯演示投影，不是服务端字段。首版没有任何 REST/SSE 请求。
+在 `static/js/service.js` 的装配点换掉演示适配器，保留异步查询、命令，以及 `subscribe(sessionId, listener) → unsubscribe` 的 UI 接口。`getSession` 是 UI 的聚合快照，不是宣称已存在的 HTTP 路径；应按最终 Web 契约取会话、消息、工具调用、审批等权威记录，同步后再接收该会话的 SSE 事件。断线、重复投递或切换会话时按权威快照校准、关闭旧订阅；不要把 SSE 内容当成持久状态，也不要把同一 `seq` 的不同事件视为重复。审批决定和恢复应继续分开，恢复时传入审批 ID。`demo.note` 是纯演示投影，不是服务端字段。当前演示页面不发出 REST/SSE 业务请求。

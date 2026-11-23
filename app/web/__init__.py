@@ -1,0 +1,1 @@
+"""Local, read-only HTTP assembly for the in-memory Harness."""
