@@ -30,6 +30,14 @@ const pairs = (rows) => rows.flatMap(([key, value]) => [el('dt', {}, key), el('d
 export const kv = (rows) => el('dl', { class: 'kv' }, pairs(rows));
 const fill = (id, ...nodes) => $(id).replaceChildren(...nodes.filter(Boolean));
 const list = (id, rows, message) => fill(id, ...(rows.length ? rows : [empty(message)]));
+const table = (id, rows, message) => {
+  const columns = [...$(id).closest('table').tHead.rows[0].cells].map((cell) => cell.textContent);
+  fill(id, ...(rows.length ? rows.map((row) => el('tr', {}, row.map((value, i) =>
+    el(i === 0 ? 'th' : 'td', { 'data-label': columns[i], scope: i === 0 ? 'row' : null }, value)))) :
+    [el('tr', {}, el('td', { colspan: columns.length }, empty(message)))]));
+};
+const identity = (mark, name, subtitle) => el('div', { class: 'identity' },
+  el('span', { class: 'avatar', 'aria-hidden': 'true' }, mark), el('div', {}, el('strong', {}, name), subtitle && meta(subtitle)));
 const rowHead = (title, extra) => el('div', { class: 'row-head' }, el('h3', {}, title), extra);
 const item = (...items) => el('article', { class: 'item stack' }, items);
 const actions = (...items) => el('div', { class: 'actions' }, items);
@@ -69,15 +77,18 @@ function chat(s, ui) {
   $('composer').onsubmit = (e) => { e.preventDefault(); ui.send(message.value, false); };
   $('write').onclick = () => { if (message.reportValidity()) ui.send(message.value, true); };
   fill('session-status', badge(s.session.status));
+  $('chat-session').textContent = `会话 · ${s.session.title ?? s.session.id}`;
   const roles = { user: '你', assistant: '助手', tool: '工具观察', summary: '摘要', system: '系统' };
-  list('chat-stream', s.messages.map((m) => el('article', { class: `message ${Object.hasOwn(roles, m.role) ? m.role : ''}` },
-    meta(`${roles[m.role] ?? m.role} · #${m.seq} · ${time(m.created_at)}`), el('p', {}, m.content ?? '（无文本内容）'),
-    m.tool_call_id && meta(m.tool_call_id))), '这是一条空会话。发送消息开始体验。');
+  list('chat-stream', s.messages.map((m, i) => el('article', {
+    class: `message ${Object.hasOwn(roles, m.role) ? m.role : ''}${i === s.messages.length - 1 && s.session.status === 'completed' ? ' update' : ''}`,
+  }, identity(m.role === 'user' ? 'U' : 'A', roles[m.role] ?? m.role,
+    `#${m.seq} · ${time(m.created_at)}`), el('p', { class: 'message-text' }, m.content ?? '（无文本内容）'),
+  m.tool_call_id && meta(m.tool_call_id))), '这是一条空会话。发送消息开始体验。');
   const next = recovery(s, ui);
   $('recovery').hidden = !next;
   fill('recovery-action', next);
   const render = (type) => list('event-stream', [...s.events].reverse().filter((e) => !type || e.type === type).map((event) =>
-    el('article', { class: 'event' }, rowHead(eventTypes[event.type] ?? event.type, meta(`#${event.seq} · ${time(event.created_at)}`)),
+    el('article', { class: 'event', 'data-event': event.type }, rowHead(eventTypes[event.type] ?? event.type, meta(`#${event.seq} · ${time(event.created_at)}`)),
       disclose(`载荷 · ${event.type}`, event.payload))), '没有符合筛选条件的事件。');
   select('event-filter', ui.filters.event, (value) => { ui.filters.event = value; render(value); },
     [['', '全部事件'], ...Object.entries(eventTypes)]);
@@ -96,10 +107,22 @@ function approvals(s, ui) {
 }
 
 function sessions(s, ui) {
-  list('session-list', ui.sessions.map((row) => item(rowHead(row.title ?? row.id, badge(row.status)),
-    meta(`${row.id} · 更新于 ${time(row.updated_at)}`),
-    actions(row.id === s.session.id ? meta('当前会话') : button('切换会话', () => ui.switchSession(row.id), { 'data-focus': row.id })))),
-  '暂无会话。');
+  const input = $('session-search');
+  const render = () => {
+    const term = ui.filters.sessionSearch.trim().toLowerCase();
+    table('session-list', ui.sessions.filter((row) => (!ui.filters.sessionStatus || row.status === ui.filters.sessionStatus) &&
+      `${row.title ?? ''} ${row.id}`.toLowerCase().includes(term)).map((row) => [
+      identity('▤', row.title ?? row.id, row.id), time(row.updated_at), badge(row.status),
+      row.id === s.session.id ? meta('当前会话') : button('切换会话', () => ui.switchSession(row.id), {
+        'data-focus': row.id, class: ['open', 'waiting_approval'].includes(row.status) ? 'primary' : null,
+      }),
+    ]), '没有符合筛选条件的会话。');
+  };
+  input.value = ui.filters.sessionSearch;
+  input.oninput = () => { ui.filters.sessionSearch = input.value; render(); };
+  select('session-filter', ui.filters.sessionStatus, (value) => { ui.filters.sessionStatus = value; render(); },
+    [['', '全部状态'], ...['idle', 'open', 'waiting_approval', 'completed', 'failed', 'abandoned'].map((key) => [key, labels[key]])]);
+  render();
   $('new-session-form').onsubmit = (e) => { e.preventDefault(); ui.createSession($('new-session').value); };
   fill('session-summary', ...pairs([['会话 ID', s.session.id], ['消息数', s.messages.length],
     ['创建时间', time(s.session.created_at)], ['状态', badge(s.session.status)]]));
@@ -108,9 +131,19 @@ function sessions(s, ui) {
 
 function checkpoints(s, ui) {
   $('checkpoint-form').onsubmit = (e) => { e.preventDefault(); ui.checkpoint($('checkpoint-description').value); };
-  list('checkpoint-list', [...s.checkpoints].reverse().map((c) => item(rowHead(c.description ?? '未命名检查点', badge(`#${c.seq}`)),
-    meta(`${c.id} · ${time(c.created_at)}`), actions(button('模拟回滚至此处', (e) => ui.rollback(c, e.currentTarget),
-      { 'data-focus': c.id, disabled: Boolean(s.turn) })))), '尚无检查点。');
+  const points = [...s.checkpoints].reverse();
+  const target = $('rollback-target');
+  const selected = target.value;
+  $('checkpoint-count').textContent = `${points.length} 个检查点`;
+  list('checkpoint-list', points.map((c) => item(identity('●', c.description ?? '未命名检查点',
+    `${c.id} · #${c.seq} · ${time(c.created_at)}`))), '尚无检查点。');
+  target.replaceChildren(...(points.length ? points.map((c) => el('option', { value: c.id }, `${c.id} · ${c.description ?? '未命名检查点'}`)) :
+    [el('option', { value: '' }, '暂无检查点')]));
+  target.value = points.some((c) => c.id === selected) ? selected : points[0]?.id ?? '';
+  target.disabled = !points.length;
+  const restore = $('rollback-review');
+  restore.disabled = !points.length || Boolean(s.turn);
+  restore.onclick = () => ui.rollback(points.find((c) => c.id === target.value), restore);
   $('note').textContent = s.demo?.note ?? '—';
   $('rollback-blocked').hidden = !s.turn;
   const result = s.demo?.rollback;
@@ -121,19 +154,34 @@ function checkpoints(s, ui) {
     meta(`${call.id} · ${call.reversible ? '带补偿凭据' : '无补偿凭据'}`), disclose('原始参数', call.arguments))), '暂无工具调用。');
 }
 
-function subagents(s) {
-  list('subagent-list', s.subagents.map(({ task, result }) => item(
-    rowHead(task.id, badge(result?.status ?? 'running')), el('p', {}, task.prompt),
-    kv([['父会话', task.parent_session_id], ['父调用', task.parent_call_id], ['允许工具', task.allowed_tools.join('、') || '无'],
-      ['深度', task.depth], ['迭代上限', task.max_iterations], ['已报告步数', result?.steps], ['Tokens', result?.tokens]]),
-    result ? el('p', {}, result.summary) : notice('尚无结果；此条目是运行中示例。'))), '此会话没有子代理任务。');
+function subagents(s, ui) {
+  const selected = () => s.subagents.find(({ task }) => task.id === ui.filters.subagent) ?? s.subagents[0];
+  const render = () => {
+    const current = selected();
+    fill('subagent-parent', identity('P', s.session.title ?? s.session.id, s.session.id));
+    $('subagent-count').textContent = `${s.subagents.length} 个任务`;
+    list('subagent-list', s.subagents.map(({ task, result }) => item(el('div', { class: 'row-head' },
+      identity('↗', task.id, task.prompt), badge(result?.status ?? 'running')), actions(button('查看详情', () => {
+      ui.filters.subagent = task.id;
+      render();
+      $('subagent-detail-title').focus();
+    }, { 'aria-controls': 'subagent-detail', 'aria-current': current.task.id === task.id ? 'true' : null })))), '此会话没有子代理任务。');
+    fill('subagent-detail', current ? kv([['任务', current.task.id], ['状态', badge(current.result?.status ?? 'running')],
+      ['父会话', current.task.parent_session_id], ['父调用', current.task.parent_call_id], ['允许工具', current.task.allowed_tools.join('、') || '无'],
+      ['深度', current.task.depth], ['迭代上限', current.task.max_iterations], ['已报告步数', current.result?.steps], ['Tokens', current.result?.tokens]]) :
+      empty('没有可查看的任务。'));
+    list('subagent-results', s.subagents.filter(({ result }) => result).map(({ task, result }) =>
+      item(rowHead(task.id, badge(result.status)), el('p', {}, result.summary))), '没有已返回的结果。');
+  };
+  render();
 }
 
 function tools(s, ui) {
   const render = (value) => {
     const term = value.trim().toLowerCase();
-    list('tool-list', ui.tools.map((t) => t.function).filter((t) => `${t.name} ${t.description}`.toLowerCase().includes(term))
-      .map((t) => item(rowHead(t.name, badge('只读目录')), el('p', {}, t.description), disclose('参数 Schema', t.parameters))),
+    table('tool-list', ui.tools.map((t) => t.function).filter((t) => `${t.name} ${t.description}`.toLowerCase().includes(term))
+      .map((t) => [identity('✣', t.name), t.description, t.name === 'demo_note' ? el('span', { class: 'badge pending' }, '需要审批') : '不执行',
+        badge(t.name === 'demo_note' ? '模拟' : '只读目录'), disclose('参数 Schema', t.parameters)]),
     '没有匹配的工具。');
   };
   const input = $('tool-search');
@@ -145,18 +193,27 @@ function tools(s, ui) {
 function audit(s, ui) {
   const labels = { session_created: '创建会话', approval_decided: '审批决定', subagent_started: '启动子代理',
     subagent_finished: '子代理结束', rollback_performed: '模拟回滚' };
-  const render = (action) => list('audit-list', ui.audit.filter((a) => !action || a.action === action)
-    .map((a) => item(rowHead(labels[a.action] ?? a.action, meta(time(a.created_at))),
-      kv([['记录 ID', a.id], ['会话', a.session_id], ['操作者', a.actor], ['动作', a.action]]),
-      a.detail != null && disclose('审计详情', a.detail))), '没有符合筛选条件的审计记录。');
+  const input = $('audit-search');
+  const render = () => {
+    const term = ui.filters.auditSearch.trim().toLowerCase();
+    table('audit-list', ui.audit.filter((a) => (!ui.filters.audit || a.action === ui.filters.audit) &&
+      `${a.actor} ${a.action} ${labels[a.action] ?? ''} ${a.session_id} ${ui.sessions.find((row) => row.id === a.session_id)?.title ?? ''}`.toLowerCase().includes(term))
+      .map((a) => [time(a.created_at), a.actor, el('strong', { class: 'event-label' }, labels[a.action] ?? a.action),
+        [meta(`${a.session_id} · ${a.id}`), a.detail != null && disclose('审计详情', a.detail)],
+        a.detail?.decision || a.detail?.status ? badge(a.detail.decision ?? a.detail.status) : '—']), '没有符合筛选条件的审计记录。');
+  };
+  input.value = ui.filters.auditSearch;
+  input.oninput = () => { ui.filters.auditSearch = input.value; render(); };
   select('audit-scope', ui.filters.scope, ui.auditScope);
-  select('audit-action', ui.filters.audit, (value) => { ui.filters.audit = value; render(value); },
+  select('audit-action', ui.filters.audit, (value) => { ui.filters.audit = value; render(); },
     [['', '全部动作'], ...Object.entries(labels)]);
-  render(ui.filters.audit);
+  render();
 }
 
 function context(s, ui) {
   const { context: ctx, agents_document: doc, session } = s;
+  $('context-session').textContent = session.title ?? session.id;
+  $('context-tokens').textContent = ctx.estimated_tokens;
   fill('context-summary', ...pairs([['前缀哈希', session.prefix_hash], ['AGENTS.md 版本', session.agents_md_version],
     ['估算 Tokens', ctx.estimated_tokens], ['剔除历史条数', ctx.trimmed_messages], ['已摘要', ctx.summarized ? '是' : '否']]));
   $('context-prefix').textContent = json(ctx.prefix);

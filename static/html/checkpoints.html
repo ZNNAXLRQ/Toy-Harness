@@ -12,8 +12,9 @@
 <body>
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
-    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
-    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
+    <p class="nav-label">代理工作空间</p>
+    <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
     <nav aria-label="工作台导航">
       <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
@@ -23,47 +24,60 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <p class="nav-label nav-divider">工作区</p>
       <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
   </aside>
   <main id="main" tabindex="-1">
-    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>检查点与回滚</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <header class="masthead">
+      <div><h1 id="page-title" tabindex="-1">检查点与回滚</h1><p>只补偿检查点之后可逆的模拟写入，不删除消息历史。</p></div>
+      <div class="header-tools"><label class="workspace" for="session-select"><span class="sr-only">当前会话</span><select id="session-select" disabled><option>加载中…</option></select></label><span class="badge mode">示例模式</span><span class="avatar" aria-hidden="true">U</span></div>
+    </header>
     <div class="content">
-      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">检查点与回滚</h1><p>只补偿检查点之后可逆的模拟写入，不删除消息历史。</p></header>
       <div id="error" class="notice error" role="alert" hidden></div>
       <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
       <div id="status" class="sr-only" role="status"></div>
       <p id="loading" class="empty">正在加载本地演示…</p>
       <button type="button" id="retry" hidden>重试</button>
       <div id="page" data-page="checkpoints" aria-busy="true" hidden>
-        <div class="grid equal">
+        <div class="grid checkpoint-grid">
           <section class="card panel" aria-labelledby="checkpoints-title">
-            <h2 id="checkpoints-title">会话检查点</h2>
+            <div class="section-head"><div><h2 id="checkpoints-title">会话检查点</h2><p class="meta">此会话的快照 · 最新在前</p></div><span id="checkpoint-count" class="badge"></span></div>
             <form id="checkpoint-form" class="filters">
               <label class="field grow" for="checkpoint-description">检查点说明<input id="checkpoint-description" maxlength="100" placeholder="例如：变更前（可选）"></label>
               <button type="submit" class="primary" data-focus="new-checkpoint">创建检查点</button>
             </form>
             <div id="checkpoint-list" class="stack"></div>
           </section>
-          <section class="card panel" aria-labelledby="workspace-title">
+          <div class="stack side-panels">
+          <section class="card panel" aria-labelledby="restore-title">
+            <h2 id="restore-title">恢复所选检查点</h2>
+            <p class="meta">审阅目标后确认模拟回滚。</p>
+            <div class="stack">
+              <label class="field" for="rollback-target">目标检查点<select id="rollback-target"></select></label>
+              <button type="button" class="primary" id="rollback-review" data-focus="rollback-review">审阅并恢复检查点</button>
+              <p id="rollback-blocked" class="notice" hidden>当前轮次未结束，暂不能回滚。</p>
+              <div id="rollback-result"></div>
+            </div>
+          </section>
+          <section class="card panel warning-panel" aria-labelledby="workspace-title">
             <h2 id="workspace-title">模拟工作区</h2>
             <div class="stack">
               <p class="notice">演示便笺仅保存在此标签页。回滚按逆序补偿，不重写历史。</p>
               <pre id="note"></pre>
-              <p id="rollback-blocked" class="notice" hidden>当前轮次未结束，暂不能回滚。</p>
-              <div id="rollback-result"></div>
               <h3>工具调用历史</h3><div id="tool-call-list" class="stack"></div>
             </div>
           </section>
+          </div>
         </div>
       </div>
       <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
     </div>
+    <footer>本地演示 · 不连接后端</footer>
   </main>
   <dialog id="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
-    <header class="dialog-head"><h2 id="dialog-title"></h2><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
-    <p id="dialog-description"></p>
+    <header class="dialog-head"><span class="dialog-mark" aria-hidden="true">!</span><div><h2 id="dialog-title"></h2><p id="dialog-description"></p></div><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
     <div id="dialog-body"></div>
     <p id="dialog-error" class="notice error" role="alert" hidden></p>
     <div id="dialog-actions" class="actions dialog-actions"></div>

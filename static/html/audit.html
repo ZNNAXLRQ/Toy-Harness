@@ -12,8 +12,9 @@
 <body>
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
-    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
-    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
+    <p class="nav-label">代理工作空间</p>
+    <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
     <nav aria-label="工作台导航">
       <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
@@ -23,31 +24,41 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html" aria-current="page"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <p class="nav-label nav-divider">工作区</p>
       <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
   </aside>
   <main id="main" tabindex="-1">
-    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>审计日志</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <header class="masthead">
+      <div><h1 id="page-title" tabindex="-1">审计日志</h1><p>查看会话创建、审批决策、子代理和回滚记录。</p></div>
+      <div class="header-tools"><label class="workspace" for="session-select"><span class="sr-only">当前会话</span><select id="session-select" disabled><option>加载中…</option></select></label><span class="badge mode">示例模式</span><span class="avatar" aria-hidden="true">U</span></div>
+    </header>
     <div class="content">
-      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">审计日志</h1><p>查看会话创建、审批决策、子代理和回滚记录。</p></header>
       <div id="error" class="notice error" role="alert" hidden></div>
       <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
       <div id="status" class="sr-only" role="status"></div>
       <p id="loading" class="empty">正在加载本地演示…</p>
       <button type="button" id="retry" hidden>重试</button>
       <div id="page" data-page="audit" aria-busy="true" hidden>
-        <section class="card panel" aria-labelledby="audit-title">
+        <section class="card panel full-panel" aria-labelledby="audit-title">
           <h2 id="audit-title">审计记录</h2>
+          <p class="meta">只读历史 · 最新记录在前</p>
           <div class="filters">
-            <label class="field" for="audit-scope">会话范围<select id="audit-scope"><option value="current">当前会话</option><option value="all">所有会话</option></select></label>
-            <label class="field" for="audit-action">动作<select id="audit-action"></select></label>
+            <label class="field grow" for="audit-search"><span class="sr-only">搜索审计</span><input id="audit-search" type="search" placeholder="搜索操作者、动作或会话"></label>
+            <label class="field" for="audit-scope"><span class="sr-only">会话范围</span><select id="audit-scope"><option value="current">当前会话</option><option value="all">所有会话</option></select></label>
+            <label class="field" for="audit-action"><span class="sr-only">动作</span><select id="audit-action"></select></label>
           </div>
-          <div id="audit-list" class="stack"></div>
+          <table class="record-table audit-table" aria-labelledby="audit-title">
+            <thead><tr><th scope="col">时间</th><th scope="col">操作者</th><th scope="col">动作</th><th scope="col">会话与详情</th><th scope="col">结果</th></tr></thead>
+            <tbody id="audit-list"></tbody>
+          </table>
+          <p class="panel-foot meta">记录仅来自本地演示，不会上传或同步。</p>
         </section>
       </div>
       <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
     </div>
+    <footer>本地演示 · 不连接后端</footer>
   </main>
 </body>
 </html>

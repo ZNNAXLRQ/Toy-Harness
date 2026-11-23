@@ -9,7 +9,8 @@ const selector = $('session-select');
 const dialog = $('dialog');
 const errorBox = $('error');
 const dialogError = $('dialog-error');
-const filters = { event: '', approval: '', tool: '', scope: 'current', audit: '' };
+const filters = { event: '', approval: '', tool: '', scope: 'current', audit: '', auditSearch: '',
+  sessionSearch: '', sessionStatus: '', subagent: '' };
 const drafts = new Map();
 let sessionId;
 let sessionRows = [];
@@ -25,6 +26,10 @@ function error(message = '', target = errorBox) {
 }
 const focus = (node) => node?.focus({ preventScroll: true });
 const announce = (message) => { $('status').textContent = message; };
+let focusNewSession = route === 'sessions' && location.hash === '#new-session';
+window.addEventListener('hashchange', () => {
+  if (route === 'sessions' && location.hash === '#new-session') $('new-session').focus();
+});
 $('skip').addEventListener('click', (event) => { event.preventDefault(); $('main').focus(); });
 // Back/forward may restore the old JS instance instead of booting a new document.
 window.addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
@@ -134,6 +139,10 @@ async function refresh(options = {}) {
     page.hidden = false;
     $('loading').hidden = true;
     restorePage(before, options);
+    if (focusNewSession) {
+      focusNewSession = false;
+      $('new-session').focus();
+    }
   } catch (cause) {
     if (version !== loadVersion) return;
     error(`无法加载此页面：${cause.message}`);
@@ -172,13 +181,14 @@ async function perform(operation, options = {}) {
   }
 }
 
-function openModal(trigger, heading, description, body, ...buttons) {
+function openModal(trigger, heading, description, body, buttons, variant = '') {
   if (dialog.open || busy) return;
   returnFocus = trigger;
   $('dialog-title').textContent = heading;
   $('dialog-description').textContent = description;
   $('dialog-body').replaceChildren(body);
-  $('dialog-actions').replaceChildren(button('取消', closeModal), ...buttons);
+  dialog.dataset.variant = variant;
+  $('dialog-actions').replaceChildren(...buttons);
   error('', dialogError);
   dialog.showModal();
   focus($('dialog-close'));
@@ -206,17 +216,20 @@ function openApproval(id, approval, trigger) {
     modal: true, message: '已记录审批决定；恢复演示轮次后才会继续。', focusKey: 'resume',
     after: () => { if (filters.approval && filters.approval !== decision) filters.approval = ''; },
   });
-  openModal(trigger, '确认模拟工具请求', '示例模式：只记录决定，不执行真实操作。决定后可手动恢复轮次。',
-    el('div', { class: 'stack' }, el('p', {}, approval.description),
-      kv([['工具', approval.tool_name], ['审批 ID', approval.id], ['调用 ID', approval.call_id]]), code(approval.arguments)),
-    button('拒绝', () => decide('denied'), { class: 'danger' }), button('批准', () => decide('approved'), { class: 'primary' }));
+  openModal(trigger, '需要审批', '审阅模拟工具请求。此处只记录决定，不执行真实操作。',
+    el('div', { class: 'stack approval-body' },
+      el('div', { class: 'inset' }, kv([['工具', approval.tool_name], ['审批 ID', approval.id], ['调用 ID', approval.call_id]]),
+        el('h3', {}, '拟提交的参数'), code(approval.arguments)),
+      el('p', {}, approval.description), el('span', { class: 'badge pending' }, '操作 · 模拟便笺更新'),
+      el('p', { class: 'meta' }, '批准或拒绝后都需要手动恢复轮次；拒绝不会派发此工具。')),
+    [button('拒绝', () => decide('denied'), { class: 'danger' }), button('批准', () => decide('approved'), { class: 'primary' })], 'approval');
 }
 function openRollback(id, point, trigger) {
   openModal(trigger, '确认模拟回滚', '这个操作只补偿检查点之后的示例便笺写入。历史和审计不会删除。',
     kv([['检查点', point.description ?? point.id], ['消息序号', point.seq]]),
-    button('确认模拟回滚', () => perform(() => service.rollback(id, point.id), {
-      modal: true, message: '已处理模拟回滚。', focusKey: point.id,
-    }), { class: 'danger' }));
+    [button('取消', closeModal), button('确认模拟回滚', () => perform(() => service.rollback(id, point.id), {
+      modal: true, message: '已处理模拟回滚。', focusKey: 'rollback-review',
+    }), { class: 'danger' })]);
 }
 
 async function start() {

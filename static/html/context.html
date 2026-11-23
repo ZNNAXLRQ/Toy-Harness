@@ -12,8 +12,9 @@
 <body>
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
-    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
-    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
+    <p class="nav-label">代理工作空间</p>
+    <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
     <nav aria-label="工作台导航">
       <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
@@ -23,50 +24,58 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <p class="nav-label nav-divider">工作区</p>
       <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
   </aside>
   <main id="main" tabindex="-1">
-    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>上下文与恢复</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <header class="masthead">
+      <div><h1 id="page-title" tabindex="-1">上下文与恢复</h1><p>检查会话级稳定前缀、消息尾部和未完成轮次。</p></div>
+      <div class="header-tools"><label class="workspace" for="session-select"><span class="sr-only">当前会话</span><select id="session-select" disabled><option>加载中…</option></select></label><span class="badge mode">示例模式</span><span class="avatar" aria-hidden="true">U</span></div>
+    </header>
     <div class="content">
-      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">上下文与恢复</h1><p>检查会话级稳定前缀、消息尾部和未完成轮次。</p></header>
       <div id="error" class="notice error" role="alert" hidden></div>
       <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
       <div id="status" class="sr-only" role="status"></div>
       <p id="loading" class="empty">正在加载本地演示…</p>
       <button type="button" id="retry" hidden>重试</button>
       <div id="page" data-page="context" aria-busy="true" hidden>
-        <div class="grid equal">
+        <div class="grid equal context-grid">
+          <section class="card panel" aria-labelledby="recovery-title">
+            <h2 id="recovery-title">会话恢复</h2><p class="meta">当前标签页中可继续的演示状态</p>
+            <strong id="context-session" class="metric"></strong>
+            <dl id="turn-summary" class="kv"></dl>
+            <div class="actions recovery-links"><div id="recovery-action"></div><a class="button" href="checkpoints.html">查看检查点</a><a class="button" href="index.html">查看会话历史</a><a href="sessions.html">返回会话列表</a></div>
+          </section>
           <section class="card panel" aria-labelledby="context-title">
-            <h2 id="context-title">上下文快照</h2>
+            <h2 id="context-title">上下文快照</h2><p class="meta">当前本地上下文估算 · 不是模型用量</p>
+            <p class="metric"><strong id="context-tokens"></strong> <span class="meta">估算 Tokens</span></p>
             <div class="stack">
               <dl id="context-summary" class="kv"></dl>
               <details><summary>稳定前缀</summary><pre id="context-prefix"></pre></details>
               <details><summary>消息尾部</summary><pre id="context-messages"></pre></details>
             </div>
           </section>
-          <div class="stack">
-            <section class="card panel" aria-labelledby="agents-title">
-              <h2 id="agents-title">AGENTS.md</h2><dl id="agents-summary" class="kv"></dl>
-              <details><summary>查看文档内容</summary><pre id="agents-content"></pre></details>
-            </section>
-            <section class="card panel" aria-labelledby="recovery-title">
-              <h2 id="recovery-title">轮次恢复</h2>
-              <div class="stack">
-                <dl id="turn-summary" class="kv"></dl><div id="recovery-action"></div>
-                <div class="actions"><a href="index.html">查看会话历史</a><a href="sessions.html">返回会话列表</a></div>
-              </div>
-            </section>
-          </div>
+          <section class="card panel" aria-labelledby="agents-title">
+            <h2 id="agents-title">项目说明</h2><p class="meta">演示提供的 AGENTS.md 和 Skills</p>
+            <div class="inset"><h3>AGENTS.md</h3><dl id="agents-summary" class="kv"></dl></div>
+            <details><summary>查看文档内容</summary><pre id="agents-content"></pre></details>
+          </section>
+          <section class="card panel" aria-labelledby="policy-title">
+            <h2 id="policy-title">上下文策略</h2><p class="meta">本地演示实际使用的规则</p>
+            <dl class="policy-list"><dt>稳定前缀</dt><dd>使用固定前缀和项目说明构造上下文。</dd>
+              <dt>历史裁剪</dt><dd>保留近期消息，避免留下没有对应调用的工具观察。</dd>
+              <dt>状态存储</dt><dd>会话和检查点存于当前标签页，不调用后端。</dd></dl>
+          </section>
         </div>
       </div>
       <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
     </div>
+    <footer>本地演示 · 不连接后端</footer>
   </main>
   <dialog id="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
-    <header class="dialog-head"><h2 id="dialog-title"></h2><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
-    <p id="dialog-description"></p>
+    <header class="dialog-head"><span class="dialog-mark" aria-hidden="true">!</span><div><h2 id="dialog-title"></h2><p id="dialog-description"></p></div><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
     <div id="dialog-body"></div>
     <p id="dialog-error" class="notice error" role="alert" hidden></p>
     <div id="dialog-actions" class="actions dialog-actions"></div>
