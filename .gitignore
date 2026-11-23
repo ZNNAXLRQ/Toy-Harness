@@ -18,3 +18,7 @@ data/
 
 # 个人文件（仅本地保留，不提交）
 /sample.md
+
+# 本地工作流和编辑器配置
+/.local-workflow/
+/.vscode/
