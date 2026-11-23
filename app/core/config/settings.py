@@ -10,6 +10,8 @@
 2. **不发明环境变量名**。密钥沿用厂商官方的 ``OPENAI_API_KEY`` /
    ``DEEPSEEK_API_KEY`` / ``ANTHROPIC_API_KEY``，与 ``llm.provider`` 一一对应；
    yaml 里写成 ``${DEEPSEEK_API_KEY}`` 占位符时，在这里解析成真实值。
+   占位符与 provider 不一致属于配置错误（``ConfigError``），不做「尽力猜测」——
+   否则切换厂商后会把上一家的密钥发给新的服务。
 """
 
 import os
@@ -24,6 +26,8 @@ from pydantic_settings import (
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+
+from app.common.exception import ConfigError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 CONFIG_FILE = PROJECT_ROOT / "config" / "config.yaml"
@@ -99,13 +103,27 @@ class HarnessSettings(BaseSettings):
 
     @property
     def resolved_api_key(self) -> str | None:
-        """按 provider 解析出真实密钥；没有则 ``None``（由容器决定是否报错）。"""
+        """按 provider 解析出真实密钥；没有则 ``None``（由容器决定是否报错）。
+
+        占位符必须指向**当前 provider** 对应的变量：``provider`` 被
+        ``HARNESS_LLM__PROVIDER`` 之类的覆盖切到另一家、而 yaml 里还留着上一家的
+        ``${DEEPSEEK_API_KEY}`` 时，直接把那个密钥交给新适配器就是把凭据发给错误的
+        服务。这种情况视为配置错误，抛 ``ConfigError`` 而不是「尽力解析」。
+        """
         raw = (self.llm.api_key or "").strip()
+        expected = PROVIDER_ENV_KEYS[self.llm.provider]
         if raw.startswith("${") and raw.endswith("}"):
-            return os.environ.get(raw[2:-1].strip()) or None
+            name = raw[2:-1].strip()
+            if name != expected:
+                raise ConfigError(
+                    f"llm.api_key 指向 {name}，但 llm.provider 是 {self.llm.provider}；"
+                    f"切换厂商时必须一起改占位符（应为 {expected}）",
+                    detail={"provider": self.llm.provider, "placeholder": name, "expected": expected},
+                )
+            return os.environ.get(name) or None
         if raw:
             return raw
-        return os.environ.get(PROVIDER_ENV_KEYS[self.llm.provider]) or None
+        return os.environ.get(expected) or None
 
 
 def load_env(path: Path = ENV_FILE) -> None:

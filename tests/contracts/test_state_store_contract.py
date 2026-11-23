@@ -97,6 +97,46 @@ async def test_awaiting_approval_is_reported_as_the_pending_call(store):
     assert state is not None
     assert state.status == TurnStatus.WAITING_APPROVAL
     assert state.pending_call_id == "call-1"
+    assert state.iteration == 1
+
+
+async def test_user_message_without_model_reply_is_resumable(store):
+    """模型还没回复就中断：这一轮不能凭空消失。"""
+    session = await store.create_session()
+    await store.append_message(session.id, "user", "看一下这个文件")
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None
+    assert state.status == TurnStatus.OPEN
+    assert state.iteration == 0
+
+
+async def test_tool_results_waiting_for_next_model_call_are_resumable(store):
+    """工具结果已落、还没发起下一次模型调用：同样要能接续。"""
+    session, _ = await _session_with_call(store)
+    await store.set_tool_status("call-1", ToolCallStatus.DISPATCHED)
+    await store.finish_tool_call("call-1", ToolResult("success", "ok"))
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None
+    assert state.status == TurnStatus.OPEN
+    assert state.iteration == 1
+
+
+async def test_failed_result_serialization_keeps_state_and_messages_unchanged(store):
+    """序列化失败不得留下「已完成但没有输出」的半个结果。"""
+    session, _ = await _session_with_call(store)
+    await store.set_tool_status("call-1", ToolCallStatus.DISPATCHED)
+    before = len(await store.list_messages(session.id))
+
+    with pytest.raises(StateError):
+        await store.finish_tool_call("call-1", ToolResult("success", {1, 2, 3}))
+
+    calls = await store.list_tool_calls(session.id)
+    assert calls[0].status == ToolCallStatus.DISPATCHED.value
+    assert len(await store.list_messages(session.id)) == before
 
 
 async def test_dispatched_without_observation_becomes_unknown_and_is_never_replayed(store):

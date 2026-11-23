@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.common.exception import ConfigError
 from app.core.config import settings as settings_module
 from app.core.config.settings import HarnessSettings
 
@@ -93,3 +94,28 @@ def test_missing_key_returns_none_instead_of_raising(config_file, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     assert HarnessSettings().resolved_api_key is None
+
+
+def test_placeholder_from_another_provider_is_rejected(config_file, monkeypatch):
+    """切换厂商后不能把上一家的密钥发给新服务。"""
+    config_file.write_text(
+        "llm:\n  provider: deepseek\n  api_key: ${DEEPSEEK_API_KEY}\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("HARNESS_LLM__PROVIDER", "openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-fake-deepseek")
+
+    with pytest.raises(ConfigError):
+        HarnessSettings().resolved_api_key
+
+
+def test_switching_provider_uses_that_providers_key(config_file, monkeypatch):
+    """留空 api_key 时，密钥跟着 provider 走。"""
+    config_file.write_text("llm:\n  provider: deepseek\n", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_LLM__PROVIDER", "openai")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+    settings = HarnessSettings()
+
+    assert settings.llm.provider == "openai"
+    assert settings.resolved_api_key == "sk-openai"

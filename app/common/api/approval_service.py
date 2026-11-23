@@ -1,16 +1,18 @@
-"""审批端口：决策落库，turn 挂起等恢复。
+"""审批端口：判定哪些调用需要人工确认，决策落库，turn 挂起等恢复。
 
 **不阻塞**是本端口最重要的性质。原型的审批是同步 ``bool``：协程一等就是分钟级，
 进程重启就丢；而且「拒绝」只能作为工具结果回传，无法作为执行前的持久化证据。
 
-正确形状：
+责任划分（避免「谁该记录待审批」这类含糊）：
 
-1. 敏感调用先把 ``tool_calls.status`` 置 ``awaiting_approval``，``request()``
-   生成一条待审批记录并落库；
-2. 驱动层**返回**，turn 进入 ``waiting_approval``（可跨进程重启）；
-3. Web 层 ``decide()`` 写入决策 + 审计，然后调 ``AgentLoop.resume_turn()``。
+1. ``requires_approval`` 判定这次调用要不要人工确认（纯函数，不写库）；
+2. 需要时由 **loop** 落 ``tool_calls.status = awaiting_approval``，再调 ``request()``
+   生成待审批记录并落库，然后**返回**，turn 进入 ``waiting_approval``；
+3. Web 层 ``decide()`` 写入决策 + 审计；
+4. ``AgentLoop.resume_turn()`` 消费决策并派发（批准 → 执行，拒绝 → 构造
+   ``ToolResult("denied")`` 作为观察结果并停止本轮）。
 
-因此 ``decide`` 只负责记录，不负责执行——执行永远由 loop 恢复时统一发起。
+``decide`` 只记录，不执行——执行永远由 loop 恢复时统一发起。
 """
 
 from dataclasses import dataclass
@@ -41,6 +43,14 @@ class ApprovalRequest:
 
 
 class ApprovalService(Protocol):
+    def requires_approval(self, tool_name: str, arguments: Mapping[str, Any]) -> bool:
+        """纯判定：这次调用是否需要人工确认。不写库、不弹窗、不阻塞。
+
+        策略来自工作区/工具白名单/参数内容（例如写入工作区外的路径需要确认），
+        实现见 ``app/tools/approval/permission_policy.py``（B）。
+        """
+        ...
+
     async def request(self, call: ToolCallView) -> ApprovalRequest:
         """为一次敏感调用创建待审批记录；重复创建返回同一条（幂等）。"""
         ...

@@ -30,6 +30,16 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
+def _iteration(messages: Sequence[_Message]) -> int:
+    """本轮已发生的模型调用次数：最后一条 user 消息之后的 assistant 条数。"""
+    start = 0
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].role == "user":
+            start = index + 1
+            break
+    return sum(1 for message in messages[start:] if message.role == "assistant")
+
+
 @dataclass
 class _Session:
     id: str
@@ -184,6 +194,12 @@ class MemoryStateStore:
             ToolCallStatus.PENDING.value,
         }:
             raise StateError(f"tool call {call_id} is not executable: {row.status}")
+        # 先序列化再改状态：失败时状态与消息都保持原样（与 SQLite 实现的事务等价）。
+        try:
+            payload = json.dumps(result.to_dict(), ensure_ascii=False)
+        except (TypeError, ValueError) as error:
+            raise StateError(f"工具结果无法序列化，调用状态保持不变: {error}") from error
+        await self.append_message(row.session_id, "tool", payload, tool_call_id=call_id)
         row.status = (
             ToolCallStatus.COMPLETED.value
             if result.status == "success"
@@ -192,9 +208,6 @@ class MemoryStateStore:
             else ToolCallStatus.DENIED.value
         )
         self._observed.add(call_id)
-        await self.append_message(
-            row.session_id, "tool", json.dumps(result.to_dict(), ensure_ascii=False), tool_call_id=call_id
-        )
         return row
 
     async def list_tool_calls(self, session_id: str) -> Sequence[_ToolCall]:
@@ -203,36 +216,43 @@ class MemoryStateStore:
     # --- 一轮 ---
 
     async def load_open_turn(self, session_id: str) -> TurnState | None:
+        messages = self._messages.get(session_id, [])
         calls = [c for c in self._calls.values() if c.session_id == session_id]
-        open_calls = [c for c in calls if c.status in {s.value for s in _OPEN_STATUSES}]
-        unknown = []
+        if not messages and not calls:
+            return None
+
+        iteration = _iteration(messages)
+        open_statuses = {status.value for status in _OPEN_STATUSES}
+        open_calls = [c for c in calls if c.status in open_statuses]
+        unknown: list[str] = []
         for call in open_calls:
             if call.status == ToolCallStatus.DISPATCHED.value and call.id not in self._observed:
                 call.status = ToolCallStatus.UNKNOWN.value
                 unknown.append(call.id)
-        still_open = [c for c in open_calls if c.status in {s.value for s in _OPEN_STATUSES}]
+        still_open = [c for c in open_calls if c.status in open_statuses]
         awaiting = [c for c in still_open if c.status == ToolCallStatus.AWAITING_APPROVAL.value]
         if awaiting:
             return TurnState(
                 session_id=session_id,
                 status=TurnStatus.WAITING_APPROVAL,
+                iteration=iteration,
                 pending_call_id=awaiting[0].id,
                 notes={"unknown_calls": unknown},
             )
         if unknown:
             return TurnState(
-                session_id=session_id, status=TurnStatus.FAILED, notes={"unknown_calls": unknown}
+                session_id=session_id,
+                status=TurnStatus.FAILED,
+                iteration=iteration,
+                notes={"unknown_calls": unknown},
             )
         if still_open:
-            return TurnState(session_id=session_id, status=TurnStatus.OPEN)
+            return TurnState(session_id=session_id, status=TurnStatus.OPEN, iteration=iteration)
+        # 没有待执行的调用：最后一条不是 assistant，说明这一轮还没收尾
+        # （用户消息已落但模型未回复，或工具结果已落等待下一次模型调用）。
+        if messages and messages[-1].role != "assistant":
+            return TurnState(session_id=session_id, status=TurnStatus.OPEN, iteration=iteration)
         return None
-
-    async def save_turn(self, state: TurnState) -> None:
-        session = self._sessions.get(state.session_id)
-        if session is None:
-            raise NotFoundError(f"session {state.session_id} not found")
-        session.status = state.status.value
-        session.updated_at = _now()
 
     @asynccontextmanager
     async def transaction(self):
