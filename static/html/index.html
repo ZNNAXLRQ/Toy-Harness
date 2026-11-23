@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>聊天 · Toy Harness</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../css/index.css">
+  <script type="module" src="../js/app.js"></script>
+</head>
+<body>
+  <a href="#main" class="skip" id="skip">跳至主要内容</a>
+  <aside class="sidebar">
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
+    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <nav aria-label="工作台导航">
+      <a href="index.html" aria-current="page"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
+      <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
+      <a href="sessions.html"><span class="nav-icon" aria-hidden="true">▤</span>会话与恢复</a>
+      <a href="checkpoints.html"><span class="nav-icon" aria-hidden="true">↶</span>检查点与回滚</a>
+      <a href="subagents.html"><span class="nav-icon" aria-hidden="true">◎</span>子代理</a>
+      <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
+      <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
+      <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
+    </nav>
+    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>聊天</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <div class="content">
+      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">聊天与实时事件</h1><p>发送演示消息，并在同一时间线查看模型、工具与审批事件。</p></header>
+      <div id="error" class="notice error" role="alert" hidden></div>
+      <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
+      <div id="status" class="sr-only" role="status"></div>
+      <p id="loading" class="empty">正在加载本地演示…</p>
+      <button type="button" id="retry" hidden>重试</button>
+      <div id="page" data-page="chat" aria-busy="true" hidden>
+        <div class="grid split">
+          <section class="card chat-panel" aria-labelledby="messages-title">
+            <div class="section-head"><h2 id="messages-title">会话消息</h2><span id="session-status"></span></div>
+            <div id="chat-stream" class="chat-stream" tabindex="0" aria-label="消息历史"></div>
+            <div id="recovery" class="composer actions" hidden><span id="recovery-action"></span><a href="context.html">上下文与恢复</a></div>
+            <form id="composer" class="composer stack">
+              <label class="field" for="message">消息<textarea id="message" maxlength="4000" placeholder="输入演示消息…" required></textarea></label>
+              <div class="actions">
+                <button type="button" id="write" data-focus="write">模拟更新便笺</button>
+                <button type="submit" id="send" class="primary" data-focus="send">发送消息</button>
+              </div>
+            </form>
+          </section>
+          <section class="card panel" aria-labelledby="events-title">
+            <div class="section-head"><h2 id="events-title">实时事件</h2><span class="badge">本地订阅</span></div>
+            <div class="filters"><label class="field grow" for="event-filter">事件类型<select id="event-filter"></select></label></div>
+            <div class="event-stream" id="event-stream" tabindex="0" aria-label="实时事件历史"></div>
+          </section>
+        </div>
+      </div>
+      <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
+    </div>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+    <header class="dialog-head"><h2 id="dialog-title"></h2><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
+    <p id="dialog-description"></p>
+    <div id="dialog-body"></div>
+    <p id="dialog-error" class="notice error" role="alert" hidden></p>
+    <div id="dialog-actions" class="actions dialog-actions"></div>
+  </dialog>
+</body>
+</html>
