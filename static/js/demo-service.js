@@ -1,4 +1,4 @@
-// Contract-shaped, in-memory fixtures. No provider, persistence, or tool execution.
+// Contract-shaped fixtures. Optional tab snapshots; no provider or tool execution.
 const EPOCH = 1767607200;
 const ACTOR = 'demo-user';
 const NOTE_TOOL = 'demo_note';
@@ -43,11 +43,13 @@ function prepareContext({ prefix, messages, tool_calls }) {
   return { prefix, messages: recent, estimated_tokens, trimmed_messages: start, summarized: false };
 }
 
-export function createDemoService() {
-  const sessions = new Map();
+export function createDemoService({ snapshot, save } = {}) {
+  const sessions = new Map(snapshot?.sessions.map((state) => [
+    state.row.id, { ...state, compensated: new Set(state.compensated) },
+  ]));
   const listeners = new Map();
-  let tick = 0;
-  let serial = 0;
+  let tick = snapshot?.tick ?? 0;
+  let serial = snapshot?.serial ?? 0;
   const now = () => EPOCH + tick++;
   const uid = (kind) => `${kind}-${String(++serial).padStart(3, '0')}`;
   const lastSeq = (state) => state.messages.at(-1)?.seq ?? 0;
@@ -212,34 +214,45 @@ export function createDemoService() {
     return result;
   }
 
-  const first = addSession('工作区巡检');
-  begin(first, '梳理一下工作区，看看有哪些待办。');
-  complete(first, '示例工作区已整理：可以查看子代理摘要、检查点和审计记录。\n试试发送一条消息，或模拟更新便笺来体验审批。');
-  checkpoint(first, '巡检完成 · 初始检查点');
-  const review = { id: uid('run'), parent_session_id: first.row.id, parent_call_id: uid('call'),
-    prompt: '整理示例工作区的目录摘要。', allowed_tools: ['demo_review'], max_iterations: 8, depth: 1, context: {} };
-  publish(first, 'subagent_started', { run_id: review.id });
-  audit(first, 'subagent_started', { run_id: review.id });
-  const result = { run_id: review.id, status: 'success', summary: '已汇总示例目录，未修改文件。', tokens: 156, steps: 3, detail: null };
-  first.subagents.push({ task: review, result });
-  publish(first, 'subagent_finished', result);
-  audit(first, 'subagent_finished', { run_id: review.id, status: result.status });
-  const pending = addSession('便笺更新');
-  checkpoint(pending, '更新便笺前');
-  begin(pending, '请模拟更新示例便笺。');
-  requestChange(pending, '便笺已更新 · 审批演示');
-  const interrupted = addSession('中断恢复示例');
-  begin(interrupted, '这条示例消息尚未收到模型回复。');
-  interrupted.subagents.push({ task: { id: uid('run'), parent_session_id: interrupted.row.id,
-    parent_call_id: uid('call'), prompt: '等待恢复后整理示例资料。', allowed_tools: ['demo_review'],
-    max_iterations: 8, depth: 1, context: {} }, result: null });
-  publish(interrupted, 'subagent_started', { run_id: interrupted.subagents[0].task.id });
-  audit(interrupted, 'subagent_started', { run_id: interrupted.subagents[0].task.id });
+  if (!snapshot) seed();
+
+  function seed() {
+    const first = addSession('工作区巡检');
+    begin(first, '梳理一下工作区，看看有哪些待办。');
+    complete(first, '示例工作区已整理：可以查看子代理摘要、检查点和审计记录。\n试试发送一条消息，或模拟更新便笺来体验审批。');
+    checkpoint(first, '巡检完成 · 初始检查点');
+    const review = { id: uid('run'), parent_session_id: first.row.id, parent_call_id: uid('call'),
+      prompt: '整理示例工作区的目录摘要。', allowed_tools: ['demo_review'], max_iterations: 8, depth: 1, context: {} };
+    publish(first, 'subagent_started', { run_id: review.id });
+    audit(first, 'subagent_started', { run_id: review.id });
+    const result = { run_id: review.id, status: 'success', summary: '已汇总示例目录，未修改文件。', tokens: 156, steps: 3, detail: null };
+    first.subagents.push({ task: review, result });
+    publish(first, 'subagent_finished', result);
+    audit(first, 'subagent_finished', { run_id: review.id, status: result.status });
+    const pending = addSession('便笺更新');
+    checkpoint(pending, '更新便笺前');
+    begin(pending, '请模拟更新示例便笺。');
+    requestChange(pending, '便笺已更新 · 审批演示');
+    const interrupted = addSession('中断恢复示例');
+    begin(interrupted, '这条示例消息尚未收到模型回复。');
+    interrupted.subagents.push({ task: { id: uid('run'), parent_session_id: interrupted.row.id,
+      parent_call_id: uid('call'), prompt: '等待恢复后整理示例资料。', allowed_tools: ['demo_review'],
+      max_iterations: 8, depth: 1, context: {} }, result: null });
+    publish(interrupted, 'subagent_started', { run_id: interrupted.subagents[0].task.id });
+    audit(interrupted, 'subagent_started', { run_id: interrupted.subagents[0].task.id });
+  }
+
+  function commit(result) {
+    save?.({ tick, serial, sessions: [...sessions.values()].map((state) => ({
+      ...state, compensated: [...state.compensated],
+    })) });
+    return structuredClone(result);
+  }
 
   return {
     mode: 'demo',
     async listSessions() { return structuredClone([...sessions.values()].map(({ row }) => row)); },
-    async createSession(title) { return structuredClone(addSession(title?.trim() || '新会话').row); },
+    async createSession(title) { return commit(addSession(title?.trim() || '新会话').row); },
     async getSession(id) {
       const s = session(id);
       return structuredClone({ session: s.row, messages: s.messages, tool_calls: s.tool_calls, approvals: s.approvals,
@@ -261,13 +274,13 @@ export function createDemoService() {
     async send(id, content, { demoWrite = false } = {}) {
       const s = session(id);
       begin(s, content);
-      return structuredClone(demoWrite ? requestChange(s, content)
+      return commit(demoWrite ? requestChange(s, content)
         : complete(s, `收到这条演示消息：\n${content}\n\n这是本地固定规则回复，没有请求模型。`));
     },
-    async decide(id, approvalId, decision) { return structuredClone(recordDecision(session(id), approvalId, decision)); },
-    async resume(id, approvalId = null) { return structuredClone(resume(session(id), approvalId)); },
-    async createCheckpoint(id, description) { return structuredClone(checkpoint(session(id), description?.trim() || null)); },
-    async rollback(id, checkpointId) { return structuredClone(rollback(session(id), checkpointId)); },
+    async decide(id, approvalId, decision) { return commit(recordDecision(session(id), approvalId, decision)); },
+    async resume(id, approvalId = null) { return commit(resume(session(id), approvalId)); },
+    async createCheckpoint(id, description) { return commit(checkpoint(session(id), description?.trim() || null)); },
+    async rollback(id, checkpointId) { return commit(rollback(session(id), checkpointId)); },
     async listTools() { return structuredClone(tools.map((tool) => ({ type: 'function', function: tool }))); },
     async queryAudit({ session_id, limit = 100 } = {}) {
       const rows = session_id == null ? [...sessions.values()].flatMap((s) => s.audit) : session(session_id).audit;

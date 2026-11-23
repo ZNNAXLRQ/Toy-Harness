@@ -1,9 +1,9 @@
-import { service } from './service.mjs';
-import { button, code, el, empty, kv, pages, views } from './views.mjs';
+import { selectedSession, service } from './service.js';
+import { button, code, el, kv, views } from './views.js';
 
 const $ = (id) => document.getElementById(id);
-const nav = $('nav');
 const page = $('page');
+const route = page.dataset.page;
 const title = $('page-title');
 const selector = $('session-select');
 const dialog = $('dialog');
@@ -12,7 +12,6 @@ const dialogError = $('dialog-error');
 const filters = { event: '', approval: '', tool: '', scope: 'current', audit: '' };
 const drafts = new Map();
 let sessionId;
-let route;
 let sessionRows = [];
 let unsubscribe;
 let loadVersion = 0;
@@ -26,34 +25,9 @@ function error(message = '', target = errorBox) {
 }
 const focus = (node) => node?.focus({ preventScroll: true });
 const announce = (message) => { $('status').textContent = message; };
-const routeFromHash = () => {
-  const name = location.hash.slice(1);
-  return Object.hasOwn(pages, name) ? name : 'chat';
-};
-nav.append(...Object.entries(pages).map(([name, [label, , , icon]]) => el('a', { href: `#${name}` },
-  el('span', { class: 'nav-icon', 'aria-hidden': 'true' }, icon), label)));
 $('skip').addEventListener('click', (event) => { event.preventDefault(); $('main').focus(); });
-
-function showRoute(navigate = false) {
-  route = routeFromHash();
-  const [label, heading, description] = pages[route];
-  title.textContent = heading;
-  $('breadcrumb').textContent = label;
-  $('page-description').textContent = description;
-  document.title = `${label} · Toy Harness`;
-  for (const anchor of nav.querySelectorAll('a')) {
-    if (anchor.hash === `#${route}`) anchor.setAttribute('aria-current', 'page');
-    else anchor.removeAttribute('aria-current');
-  }
-  if (navigate) {
-    if (dialog.open && !busy) dialog.close();
-    error();
-    page.replaceChildren(empty('正在加载…'));
-    title.focus();
-    void refresh();
-  }
-}
-window.addEventListener('hashchange', () => showRoute(true));
+// Back/forward may restore the old JS instance instead of booting a new document.
+window.addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 
 function setOptions(rows) {
   const options = rows.map(({ id, title: name }) => el('option', { value: id }, name ?? id));
@@ -63,13 +37,17 @@ function setOptions(rows) {
 }
 function switchSession(id) {
   if (id === sessionId) return;
-  if (dialog.open && !busy) dialog.close();
+  if (dialog?.open && !busy) dialog.close();
   unsubscribe?.();
   clearTimeout(refreshTimer);
   sessionId = id;
+  selectedSession.save(id);
   selector.value = id;
   error();
-  page.replaceChildren(empty('正在加载所选会话…'));
+  page.hidden = true;
+  $('loading').hidden = false;
+  $('new-session')?.form.reset();
+  $('checkpoint-description')?.form.reset();
   try {
     unsubscribe = service.subscribe(id, () => {
       if (sessionId !== id || busy) return;
@@ -77,7 +55,7 @@ function switchSession(id) {
       refreshTimer = setTimeout(() => void refresh(), 0);
     });
   } catch (cause) { error(`事件订阅失败：${cause.message}`); }
-  void refresh({ focusSelect: document.activeElement === document.body });
+  void refresh({ focusSelect: selector.options.length > 1 && document.activeElement === document.body, follow: true });
 }
 selector.addEventListener('change', () => switchSession(selector.value));
 
@@ -89,10 +67,10 @@ function capturePage() {
     inputRange: active?.id === 'message' || active?.id === 'tool-search' ? [active.selectionStart, active.selectionEnd] : null,
     chat: $('chat-stream')?.scrollTop,
     events: $('event-stream')?.scrollTop,
-    fields: ['new-session', 'checkpoint-description'].map((id) => [id, $(id)?.value]),
-    open: new Set([...page.querySelectorAll('details[open] > summary')].map((section) => section.parentElement.textContent)),
+    open: new Set([...page.querySelectorAll('details[open]')].map(disclosureKey)),
   };
 }
+const disclosureKey = (details) => details.querySelector('pre[id]')?.id ?? details.textContent;
 function keyed(key) {
   return [...page.querySelectorAll('[data-focus]')].find((node) => node.dataset.focus === key);
 }
@@ -101,10 +79,8 @@ function restorePage(before, options) {
   const eventStream = $('event-stream');
   if (stream) stream.scrollTop = options.follow || before.chat == null ? stream.scrollHeight : before.chat;
   if (eventStream) eventStream.scrollTop = options.follow ? 0 : before.events ?? 0;
-  for (const details of page.querySelectorAll('details')) details.open = before.open.has(details.textContent);
-  for (const [id, value] of before.fields) {
-    if ($(id) && value != null && options.clearField !== id) $(id).value = value;
-  }
+  for (const details of page.querySelectorAll('details')) details.open = before.open.has(disclosureKey(details));
+  if (options.clearField) $(options.clearField).value = '';
   const next = options.focusSelect ? selector : options.focusKey ? keyed(options.focusKey)
     : $(before.focusId) ?? keyed(before.focusKey);
   if (next && !next.disabled) {
@@ -118,14 +94,14 @@ function restorePage(before, options) {
 async function refresh(options = {}) {
   const version = ++loadVersion;
   const id = sessionId;
-  const current = route;
+  $('retry').hidden = true;
   page.setAttribute('aria-busy', 'true');
   try {
     const [rows, snapshot, toolRows, auditRows, settings] = await Promise.all([
       service.listSessions(), id ? service.getSession(id) : null,
-      current === 'tools' ? service.listTools() : null,
-      current === 'audit' ? service.queryAudit({ session_id: filters.scope === 'current' ? id : undefined }) : null,
-      current === 'settings' ? service.getSettings() : null,
+      route === 'tools' ? service.listTools() : null,
+      route === 'audit' ? service.queryAudit({ session_id: filters.scope === 'current' ? id : undefined }) : null,
+      route === 'settings' ? service.getSettings() : null,
     ]);
     if (version !== loadVersion) return;
     sessionRows = rows;
@@ -153,13 +129,17 @@ async function refresh(options = {}) {
       rollback: (point, trigger) => openRollback(id, point, trigger),
       auditScope: (value) => { filters.scope = value; void refresh(); },
     };
-    page.replaceChildren(snapshot || ['tools', 'settings', 'audit'].includes(current)
-      ? views[current](snapshot, ui) : empty('暂无可查看的会话。'));
+    if (!snapshot && !['tools', 'settings', 'audit'].includes(route)) throw new Error('暂无可查看的会话。');
+    views[route](snapshot, ui);
+    page.hidden = false;
+    $('loading').hidden = true;
     restorePage(before, options);
   } catch (cause) {
     if (version !== loadVersion) return;
     error(`无法加载此页面：${cause.message}`);
-    page.replaceChildren(button('重试', () => { error(); void refresh(); }));
+    page.hidden = true;
+    $('loading').hidden = true;
+    $('retry').hidden = false;
   } finally {
     if (version === loadVersion) page.setAttribute('aria-busy', 'false');
   }
@@ -170,8 +150,7 @@ async function perform(operation, options = {}) {
   clearTimeout(refreshTimer);
   busy = true;
   const id = sessionId;
-  const fromRoute = route;
-  const modal = options.modal && dialog.open;
+  const modal = options.modal && dialog?.open;
   error('', modal ? dialogError : errorBox);
   if (modal) dialog.setAttribute('aria-busy', 'true');
   try {
@@ -182,11 +161,11 @@ async function perform(operation, options = {}) {
       dialog.close();
     }
     announce(options.message);
-    const stillHere = id === sessionId && fromRoute === route;
+    const stillHere = id === sessionId;
     await refresh(stillHere ? options : undefined);
   } catch (cause) {
     if (modal && dialog.open) error(cause.message, dialogError);
-    else if (id === sessionId && fromRoute === route) error(cause.message);
+    else if (id === sessionId) error(cause.message);
   } finally {
     busy = false;
     if (modal) dialog.removeAttribute('aria-busy');
@@ -205,15 +184,15 @@ function openModal(trigger, heading, description, body, ...buttons) {
   focus($('dialog-close'));
 }
 function closeModal() { if (!busy) dialog.close(); }
-$('dialog-close').addEventListener('click', closeModal);
-dialog.addEventListener('cancel', (event) => { if (busy) event.preventDefault(); });
-dialog.addEventListener('close', () => {
+$('dialog-close')?.addEventListener('click', closeModal);
+dialog?.addEventListener('cancel', (event) => { if (busy) event.preventDefault(); });
+dialog?.addEventListener('close', () => {
   if (dialog.open) return;
   if (returnFocus?.isConnected) focus(returnFocus);
   else if (returnFocus && document.activeElement === document.body) focus(title);
   returnFocus = null;
 });
-dialog.addEventListener('keydown', (event) => {
+dialog?.addEventListener('keydown', (event) => {
   if (event.key !== 'Tab') return;
   const controls = [...dialog.querySelectorAll('button:not(:disabled)')];
   const edge = event.shiftKey ? controls[0] : controls.at(-1);
@@ -241,15 +220,19 @@ function openRollback(id, point, trigger) {
 }
 
 async function start() {
-  showRoute();
+  error();
+  $('retry').hidden = true;
   try {
     sessionRows = await service.listSessions();
-    if (sessionRows.length) switchSession(sessionRows[0].id);
+    const selected = selectedSession.read();
+    if (sessionRows.length && !sessionId) switchSession((sessionRows.find(({ id }) => id === selected) ?? sessionRows[0]).id);
     else await refresh();
   } catch (cause) {
     error(`无法启动演示：${cause.message}`);
-    page.replaceChildren(button('重试', () => void start()));
+    $('loading').hidden = true;
+    $('retry').hidden = false;
     page.setAttribute('aria-busy', 'false');
   }
 }
+$('retry').addEventListener('click', () => void start());
 void start();
