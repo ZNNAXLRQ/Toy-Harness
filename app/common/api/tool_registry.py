@@ -15,6 +15,9 @@
 1. ``schemas`` 的顺序在同一会话内必须稳定——工具定义参与 prefix cache。
 2. ``execute`` 是唯一的执行入口，Schema 校验在这里做；loop 不得绕过它直接调用
    工具函数。
+
+另外：注册表中的工具**身份在运行期不可变**（同名重复注册直接报错），因为审批记录
+引用的是工具名，批准后换成另一个实现等于执行了没被批准的东西。
 """
 
 from typing import Any, Mapping, Protocol, Sequence
@@ -33,7 +36,12 @@ class ToolRegistry(Protocol):
         ...
 
     def register(self, tool: Tool) -> None:
-        """注册（或覆盖）一个工具；schema 与签名不一致时抛 ``ToolError``。"""
+        """注册一个工具；schema 与签名不一致、或**同名已存在**时抛 ``ToolError``。
+
+        禁止同名静默覆盖：审批记录只带 ``tool_name``，如果批准之后同名工具被换成
+        另一个实现，实际执行的就可能不是用户批准的那个。注册因此只在启动装配时
+        发生一次，运行期工具身份保持稳定。
+        """
         ...
 
     async def execute(

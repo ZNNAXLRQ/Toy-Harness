@@ -37,7 +37,11 @@ class ToolResult:
     - ``success`` / ``error`` 由工具实现产生，都会作为观察结果喂回模型；
     - ``denied`` 只由 **loop** 在审批被拒时构造（作为观察结果落库），
       工具实现与注册表都不得返回它——这样才能保证「拒绝」永远带有审批记录；
-    - ``receipt`` 是补偿凭据，``None`` 表示该操作不可回滚。
+    - ``receipt`` 是补偿凭据，``None`` 表示该操作不可回滚。成功且带凭据时，
+      ``StateStore.finish_tool_call`` 必须把它写进 observation（``{"status",
+      "result", "receipt"}`` 的 JSON），并把 ``tool_calls.reversible`` 置真；
+      ``RollbackService`` 通过 ``StateStore.get_receipt(call_id)`` 读回。
+      ``denied`` 结果不携带凭据（工具从未执行，没有需要撤销的东西）。
     """
 
     status: ToolStatus

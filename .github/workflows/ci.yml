@@ -17,9 +17,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      # --frozen：锁文件与 pyproject.toml 不一致时直接失败，避免 CI 偷偷改锁文件
+      # --locked 会在 pyproject 与锁文件不一致时**失败**；--frozen 不会，它只是不更新锁。
+      # 这里要的是「锁文件必须是提交时就最新的」。
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
 
+      # --no-sync：测试步骤不允许隐式改依赖，环境必须是上一步装好的那个。
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q

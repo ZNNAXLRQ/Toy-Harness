@@ -13,6 +13,21 @@
    ``ToolResult("denied")`` 作为观察结果并停止本轮）。
 
 ``decide`` 只记录，不执行——执行永远由 loop 恢复时统一发起。
+
+## 事务边界（实现必须满足）
+
+审批和状态分属两个端口，但「挂起」和「决策」都要求原子：
+
+1. ``request()`` 必须在 loop 打开的 ``StateStore.transaction()`` 内调用，与
+   ``set_tool_status(awaiting_approval)`` 一起提交；否则可能出现「有待审批记录但
+   调用还是 pending」或反之。
+2. ``decide()`` 必须在同一事务里写决策 + 写审计：审计表里查不到的决定，等于
+   没有发生过（谁批的、什么时候批的，答辩时会被问）。
+3. 因此 ``ApprovalService`` 的实现必须与 ``StateStore`` **共享同一个连接/工作单元**
+   （同一个 SQLite 连接，或同一个可传递的事务对象）。跨连接的「两阶段提交」不
+   现实，也不该做。
+4. ``AgentLoop.resume_turn(approval_id)`` 负责把决策绑定回原调用：审批记录里的
+   ``call_id`` 必须等于当前 ``pending_call_id``，且该调用仍为 ``awaiting_approval``。
 """
 
 from dataclasses import dataclass

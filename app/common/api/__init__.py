@@ -19,7 +19,10 @@ from app.common.api.context_manager import ContextManager, PreparedContext
 from app.common.api.llm_provider import CompletionRequest, LLMProvider, ModelResponse, ModelToolCall
 from app.common.api.rollback_service import Checkpoint, RollbackResult, RollbackService
 from app.common.api.state_store import (
+    AssistantTurn,
+    MessageRole,
     MessageView,
+    SessionStatus,
     SessionView,
     StateStore,
     ToolCallStatus,
@@ -50,7 +53,10 @@ __all__ = [
     "Checkpoint",
     "RollbackResult",
     "RollbackService",
+    "AssistantTurn",
+    "MessageRole",
     "MessageView",
+    "SessionStatus",
     "SessionView",
     "StateStore",
     "ToolCallStatus",

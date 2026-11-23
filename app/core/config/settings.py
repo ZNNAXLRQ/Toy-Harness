@@ -18,7 +18,7 @@ base_url / api_key 还留在上一家」的中间态：
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -62,8 +62,11 @@ class ProviderProfile(BaseModel):
     adapter: AdapterName = "deepseek"
     """协议形状，决定用哪个适配器、以及缺省域名取哪家的。"""
 
-    api_key: str | None = None
-    """字面值、``${VAR}`` 占位符，或留空以使用适配器对应的厂商环境变量。"""
+    api_key: str | None = Field(default=None, repr=False)
+    """字面值、``${VAR}`` 占位符，或留空以使用适配器对应的厂商环境变量。
+
+    ``repr=False``：日志里 ``print(settings)`` 不该把密钥打出来。
+    """
 
     base_url: str | None = None
     """留空表示用适配器的默认域名；填写则覆盖（自建网关、OpenRouter、vLLM 等）。"""
@@ -98,7 +101,8 @@ class ResolvedProvider:
 
     name: str
     adapter: str
-    api_key: str
+    api_key: str = field(repr=False)
+    """``repr=False``：这个对象会流经日志与调试输出，密钥不该出现在里面。"""
     base_url: str | None
     model: str | None
     timeout_seconds: float

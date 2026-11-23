@@ -157,6 +157,22 @@ def test_utf8_config_with_chinese_comments_is_readable(config_file):
     assert settings.resolve_provider().api_key == "literal-key"
 
 
+def test_repr_does_not_leak_literal_api_key(config_file):
+    """日志里 print(settings) / print(resolved) 不能把密钥打出来。"""
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n"
+        "    local:\n      adapter: openai\n      api_key: literal-secret-value\n",
+        encoding="utf-8",
+    )
+
+    settings = HarnessSettings()
+    resolved = settings.resolve_provider()
+
+    assert "literal-secret-value" not in repr(settings)
+    assert "literal-secret-value" not in repr(resolved)
+    assert resolved.api_key == "literal-secret-value"
+
+
 def test_missing_api_key_raises_with_actionable_message(config_file, monkeypatch):
     config_file.write_text(
         "llm:\n  active: deepseek\n  providers:\n    deepseek:\n      adapter: deepseek\n",
