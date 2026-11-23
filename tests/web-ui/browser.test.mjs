@@ -130,6 +130,16 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
     await main.open(page);
     assert.ok((await main.text(selector)).includes(expected), `${page}: ${await main.text(selector)}`);
     assert.deepEqual(await main.evaluate('[...document.styleSheets].map(s => new URL(s.href).pathname)'), [`/css/${page}.css`]);
+    assert.equal(await main.evaluate('new URL(document.styleSheets[0].cssRules[0].styleSheet.href).pathname'), '/css/sidebar.css');
+    assert.deepEqual(await main.evaluate(`[...document.querySelector('.sidebar').children].map(el => el.className)`),
+      ['brand', 'button primary new-link', 'nav-label', 'history-nav', 'task-nav', 'sidebar-foot']);
+    assert.equal(await main.text('.nav-label'), '工作区');
+    assert.deepEqual(await main.evaluate(`[...document.querySelectorAll('.sidebar [aria-current="page"]')]
+      .map(link => new URL(link.href).pathname)`), [`/html/${page}.html`]);
+    assert.equal(await main.evaluate(`[...document.querySelectorAll('.sidebar a')].every(link => {
+      const url = new URL(link.href);
+      return url.origin === location.origin && url.searchParams.has('session');
+    })`), true);
     await main.run('Emulation.setDeviceMetricsOverride', { width: 320, height: 820, deviceScaleFactor: 1, mobile: false });
     assert.equal(await main.evaluate('document.documentElement.scrollWidth <= innerWidth'), true, `${page} fits at 320px`);
     assert.equal(await main.evaluate('document.querySelector(".sidebar-foot").checkVisibility()'), true);
@@ -321,8 +331,83 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
   await other.waitText('#turn-summary', '已完成');
   await other.go('index');
   assert.match(await other.text('#chat-stream'), /已恢复这条未完成的演示轮次/);
+
+  const layout = client(await tab());
+  const measure = () => layout.evaluate(`{
+    const history = document.querySelector('#session-history');
+    ({ count: history.children.length, height: history.getBoundingClientRect().height,
+      scrollHeight: history.scrollHeight, clientHeight: history.clientHeight,
+      taskTop: document.querySelector('.task-nav').getBoundingClientRect().top + scrollY,
+      overflowY: getComputedStyle(history).overflowY,
+      listWidths: [history.scrollWidth, history.clientWidth],
+      pageWidths: [document.documentElement.scrollWidth, innerWidth] });
+  }`);
+  const setLayoutWidth = (width) => layout.run('Emulation.setDeviceMetricsOverride', {
+    width, height: 820, deviceScaleFactor: 1, mobile: false,
+  });
+  const measureBothWidths = async () => {
+    await setLayoutWidth(1280);
+    const desktop = await measure();
+    await setLayoutWidth(320);
+    return [desktop, await measure()];
+  };
+  await layout.open('tools');
+  const few = await measureBothWidths();
+  await layout.evaluate('sessionStorage.setItem("toy-harness.demo.v1.state", JSON.stringify({ sessions: [] }))');
+  await layout.run('Page.navigate', { url: `${origin}/html/tools.html?layout=empty` });
+  await until(() => layout.evaluate(`location.search === '?layout=empty' &&
+    !document.querySelector('#page')?.hidden && document.querySelector('#session-history')?.children.length === 0`), 'empty workspace renders');
+  const empty = await measureBothWidths();
+  await layout.evaluate(`import('/js/service.js').then(async ({ service }) => {
+    for (let i = 0; i < 20; i++) await service.createSession('LongSessionName'.repeat(5) + i);
+    location.replace('tools.html?layout=many');
+  }); true`);
+  await until(() => layout.evaluate(`new URLSearchParams(location.search).get('layout') === 'many' &&
+    document.querySelector('#session-history')?.children.length === 20`), 'populated workspace renders');
+  const many = await measureBothWidths();
+  for (const [width, crowded] of many.entries()) {
+    assert.equal(few[width].count, 3);
+    assert.equal(empty[width].count, 0);
+    assert.equal(crowded.count, 20);
+    assert.ok(few[width].height > 0);
+    for (const sample of [few[width], empty[width], crowded]) {
+      assert.equal(sample.height, few[width].height);
+      assert.equal(sample.taskTop, few[width].taskTop);
+      assert.equal(sample.overflowY, 'auto');
+      assert.ok(sample.listWidths[0] <= sample.listWidths[1], JSON.stringify(sample));
+      assert.ok(sample.pageWidths[0] <= sample.pageWidths[1], JSON.stringify(sample));
+    }
+    assert.ok(crowded.scrollHeight > crowded.clientHeight);
+  }
+
+  const last = await layout.evaluate(`{
+    const history = document.querySelector('#session-history');
+    document.querySelector('.new-link').focus();
+    history.scrollTop = 0;
+    history.lastElementChild.dataset.sessionId;
+  }`);
+  assert.equal(await layout.evaluate(`{
+    const history = document.querySelector('#session-history');
+    history.lastElementChild.getBoundingClientRect().top >= history.getBoundingClientRect().bottom;
+  }`), true);
+  for (let i = 0; i < 21; i++) {
+    await layout.run('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await layout.run('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    if (await layout.evaluate(`document.activeElement.dataset.sessionId === ${JSON.stringify(last)}`)) break;
+  }
+  assert.equal(await layout.evaluate(`{
+    const history = document.querySelector('#session-history');
+    document.activeElement === history.lastElementChild && history.scrollTop > 0 &&
+      document.activeElement.getBoundingClientRect().top < history.getBoundingClientRect().bottom;
+  }`), true);
+  await layout.run('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await layout.opened(last);
+
   assert.deepEqual(exceptions, []);
   assert.ok(requests.length > 9);
+  for (const path of ['/html/sidebar.html', '/css/sidebar.css']) {
+    assert.ok(requests.some(({ url }) => url === `${origin}${path}`), `${path} loaded from the static server`);
+  }
   for (const { url, method } of requests) {
     if (url.startsWith('data:') || url === 'about:blank') continue;
     assert.equal(new URL(url).origin, origin, url);
