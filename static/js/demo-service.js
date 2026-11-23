@@ -3,6 +3,13 @@ const EPOCH = 1767607200;
 const ACTOR = 'demo-user';
 const NOTE_TOOL = 'demo_note';
 const CONTEXT_HISTORY_LIMIT = 8;
+const workspace = { id: 'demo-workspace', title: '演示工作区' };
+// User-created session links must not alias sessions in independently seeded tabs.
+function newSessionId() {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  return `session-${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 const tools = [
   { name: 'demo_read', description: '查看示例便笺文本（目录条目，不可运行）。', parameters: { type: 'object', properties: {} } },
   { name: NOTE_TOOL, description: '模拟更新内存便笺；需要审批，并支持检查点补偿。', parameters: {
@@ -72,8 +79,7 @@ export function createDemoService({ snapshot, save } = {}) {
       });
     }
   }
-  function addSession(title) {
-    const id = uid('session');
+  function addSession(title, id) {
     const time = now();
     const state = {
       row: { id, title, status: 'idle', agents_md_version: documentFixture.version,
@@ -217,7 +223,7 @@ export function createDemoService({ snapshot, save } = {}) {
   if (!snapshot) seed();
 
   function seed() {
-    const first = addSession('工作区巡检');
+    const first = addSession('工作区巡检', uid('session'));
     begin(first, '梳理一下工作区，看看有哪些待办。');
     complete(first, '示例工作区已整理：可以查看子代理摘要、检查点和审计记录。\n试试发送一条消息，或模拟更新便笺来体验审批。');
     checkpoint(first, '巡检完成 · 初始检查点');
@@ -229,11 +235,11 @@ export function createDemoService({ snapshot, save } = {}) {
     first.subagents.push({ task: review, result });
     publish(first, 'subagent_finished', result);
     audit(first, 'subagent_finished', { run_id: review.id, status: result.status });
-    const pending = addSession('便笺更新');
+    const pending = addSession('便笺更新', uid('session'));
     checkpoint(pending, '更新便笺前');
     begin(pending, '请模拟更新示例便笺。');
     requestChange(pending, '便笺已更新 · 审批演示');
-    const interrupted = addSession('中断恢复示例');
+    const interrupted = addSession('中断恢复示例', uid('session'));
     begin(interrupted, '这条示例消息尚未收到模型回复。');
     interrupted.subagents.push({ task: { id: uid('run'), parent_session_id: interrupted.row.id,
       parent_call_id: uid('call'), prompt: '等待恢复后整理示例资料。', allowed_tools: ['demo_review'],
@@ -251,12 +257,18 @@ export function createDemoService({ snapshot, save } = {}) {
 
   return {
     mode: 'demo',
+    // A single fixture workspace owns this tab's sessions, not a filesystem path.
+    async listWorkspaces() {
+      return structuredClone([{ ...workspace, sessions: [...sessions.values()].map(({ row }) => row) }]);
+    },
     async listSessions() { return structuredClone([...sessions.values()].map(({ row }) => row)); },
-    async createSession(title) { return commit(addSession(title?.trim() || '新会话').row); },
+    async createSession(title) { return commit(addSession(title?.trim() || '新会话', newSessionId()).row); },
     async getSession(id) {
       const s = session(id);
       return structuredClone({ session: s.row, messages: s.messages, tool_calls: s.tool_calls, approvals: s.approvals,
-        turn: s.turn, outcome: s.outcome, events: s.events, checkpoints: s.checkpoints, subagents: s.subagents,
+        turn: s.turn, outcome: s.outcome, events: s.events, checkpoints: s.checkpoints,
+        subagents: s.subagents.map((run) => ({ ...run, created_at: s.events.find((event) =>
+          event.type === 'subagent_started' && event.payload.run_id === run.task.id)?.created_at })),
         agents_document: documentFixture, context: prepareContext(s),
         demo: { note: s.note, rollback: s.rollback } });
     },

@@ -4,6 +4,38 @@ import { createDemoService } from '../../static/js/demo-service.js';
 
 const pending = (snapshot) => snapshot.approvals.find((row) => row.decision == null);
 
+test('demo workspace owns its sessions; subagent creation comes from its own start event', async () => {
+  const service = createDemoService();
+  const [workspace] = await service.listWorkspaces();
+  assert.equal(workspace.id, 'demo-workspace');
+  assert.deepEqual(workspace.sessions, await service.listSessions());
+  for (const { id } of workspace.sessions) {
+    const { events, subagents } = await service.getSession(id);
+    for (const { task, created_at } of subagents) {
+      assert.equal(task.parent_session_id, id);
+      assert.equal(created_at, events.find((event) => event.type === 'subagent_started' && event.payload.run_id === task.id).created_at);
+    }
+  }
+  const created = await service.createSession('独立会话');
+  assert.deepEqual((await service.listWorkspaces())[0].sessions.at(-1), created);
+  assert.deepEqual((await service.getSession(created.id)).messages, []);
+  assert.equal(workspace.sessions.length, 3);
+});
+
+test('new session IDs do not resolve in independent instances but survive snapshot reload', async () => {
+  let saved;
+  const first = createDemoService({ save: (snapshot) => { saved = JSON.stringify(snapshot); } });
+  const second = createDemoService();
+  const a = await first.createSession('A');
+  const b = await second.createSession('B');
+
+  assert.notEqual(a.id, b.id);
+  await assert.rejects(first.getSession(b.id), /找不到所选会话/);
+  await assert.rejects(second.getSession(a.id), /找不到所选会话/);
+  const reloaded = createDemoService({ snapshot: JSON.parse(saved) });
+  assert.deepEqual((await reloaded.getSession(a.id)).session, a);
+});
+
 test('tab snapshots preserve approval boundaries, counters, and compensated calls', async () => {
   let saved;
   const open = () => createDemoService({ snapshot: saved && JSON.parse(saved), save: (snapshot) => { saved = JSON.stringify(snapshot); } });

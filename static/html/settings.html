@@ -13,10 +13,10 @@
   <a href="#main" class="skip" id="skip">跳至主要内容</a>
   <aside class="sidebar">
     <div class="brand"><span class="logo" aria-hidden="true">TH</span><strong>Toy Harness</strong></div>
-    <p class="nav-label">代理工作空间</p>
+    <p class="nav-label" id="workspace-name">演示工作区</p>
     <a class="button primary new-link" href="sessions.html#new-session">＋ 新建会话</a>
-    <nav aria-label="工作台导航">
-      <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
+    <nav class="history-nav" aria-label="工作区会话历史" id="session-history"></nav>
+    <nav class="task-nav" aria-label="工作台导航">
       <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
       <a href="sessions.html"><span class="nav-icon" aria-hidden="true">▤</span>会话与恢复</a>
       <a href="checkpoints.html"><span class="nav-icon" aria-hidden="true">↶</span>检查点与回滚</a>
@@ -24,10 +24,8 @@
       <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
       <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
       <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
-      <p class="nav-label nav-divider">工作区</p>
-      <a href="settings.html" aria-current="page"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
     </nav>
-    <div class="sidebar-foot"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></div>
+    <a class="sidebar-foot" href="settings.html" aria-current="page" aria-label="演示用户设置"><span class="avatar" aria-hidden="true">U</span><div><strong>演示用户</strong><small>本地工作区</small></div></a>
   </aside>
   <main id="main" tabindex="-1">
     <header class="masthead">
@@ -41,9 +39,13 @@
       <p id="loading" class="empty">正在加载本地演示…</p>
       <button type="button" id="retry" hidden>重试</button>
       <div id="page" data-page="settings" aria-busy="true" hidden>
-        <div class="grid equal">
-          <section class="card panel" aria-labelledby="llm-title"><h2 id="llm-title">LLM Profile</h2><dl id="llm-config" class="kv"></dl></section>
-          <section class="card panel" aria-labelledby="runtime-title"><h2 id="runtime-title">运行配置</h2><dl id="runtime-config" class="kv"></dl></section>
+        <div class="stack">
+          <div class="actions" role="tablist" aria-label="设置分组">
+            <button type="button" id="llm-tab" role="tab" aria-controls="llm-panel" aria-selected="true">模型配置</button>
+            <button type="button" id="runtime-tab" role="tab" aria-controls="runtime-panel" aria-selected="false" tabindex="-1">运行环境</button>
+          </div>
+          <section class="card panel" id="llm-panel" role="tabpanel" aria-labelledby="llm-tab" tabindex="0"><h2>模型配置</h2><dl id="llm-config" class="kv"></dl></section>
+          <section class="card panel" id="runtime-panel" role="tabpanel" aria-labelledby="runtime-tab" tabindex="0" hidden><h2>运行环境</h2><dl id="runtime-config" class="kv"></dl></section>
         </div>
       </div>
       <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>

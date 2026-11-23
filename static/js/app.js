@@ -9,7 +9,7 @@ const selector = $('session-select');
 const dialog = $('dialog');
 const errorBox = $('error');
 const dialogError = $('dialog-error');
-const filters = { event: '', approval: '', tool: '', scope: 'current', audit: '', auditSearch: '',
+const filters = { event: '', approval: '', tool: '', scope: 'all', audit: '', auditSearch: '',
   sessionSearch: '', sessionStatus: '', subagent: '' };
 const drafts = new Map();
 let sessionId;
@@ -19,6 +19,14 @@ let loadVersion = 0;
 let refreshTimer;
 let busy = false;
 let returnFocus;
+const sessionPages = new Set(['approvals', 'checkpoints', 'subagents']);
+const urlSession = () => new URLSearchParams(location.search).get('session');
+function sessionLink(page, id) {
+  const url = new URL(page, location.href);
+  url.searchParams.set('session', id);
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+const chatLink = (id) => sessionLink('index.html', id);
 
 function error(message = '', target = errorBox) {
   target.textContent = message;
@@ -31,16 +39,35 @@ window.addEventListener('hashchange', () => {
   if (route === 'sessions' && location.hash === '#new-session') $('new-session').focus();
 });
 $('skip').addEventListener('click', (event) => { event.preventDefault(); $('main').focus(); });
+// Keep a cached document from briefly exposing stale actions before it reloads.
+window.addEventListener('pagehide', (event) => {
+  if (event.persisted) {
+    page.hidden = true;
+    $('session-history').replaceChildren();
+    $('loading').hidden = false;
+  }
+});
 // Back/forward may restore the old JS instance instead of booting a new document.
 window.addEventListener('pageshow', (event) => { if (event.persisted) location.reload(); });
 
-function setOptions(rows) {
+function renderNavigation(rows) {
   const options = rows.map(({ id, title: name }) => el('option', { value: id }, name ?? id));
   selector.replaceChildren(...(options.length ? options : [el('option', {}, '暂无会话')]));
   selector.value = sessionId ?? '';
   selector.disabled = !options.length;
+  $('session-history').replaceChildren(...[...rows].sort((a, b) => b.created_at - a.created_at)
+    .map(({ id, title: name }) => el('a', {
+      href: chatLink(id), 'data-session-id': id,
+      'aria-current': id === sessionId ? (route === 'chat' ? 'page' : 'true') : null,
+    }, name ?? id)));
+  if (sessionId) {
+    for (const link of document.querySelectorAll('.task-nav a, .new-link, .sidebar-foot, [data-current-session]')) {
+      link.href = sessionLink(link.href, sessionId);
+    }
+  }
 }
-function switchSession(id) {
+function switchSession(id, historyMethod) {
+  if (historyMethod) history[historyMethod](null, '', sessionLink(location.href, id));
   if (id === sessionId) return;
   if (dialog?.open && !busy) dialog.close();
   unsubscribe?.();
@@ -60,9 +87,16 @@ function switchSession(id) {
       refreshTimer = setTimeout(() => void refresh(), 0);
     });
   } catch (cause) { error(`事件订阅失败：${cause.message}`); }
-  void refresh({ focusSelect: selector.options.length > 1 && document.activeElement === document.body, follow: true });
+  void refresh({ follow: true });
 }
-selector.addEventListener('change', () => switchSession(selector.value));
+selector.addEventListener('change', () => {
+  if (route === 'chat') location.assign(chatLink(selector.value));
+  else switchSession(selector.value, 'pushState');
+});
+window.addEventListener('popstate', () => {
+  const id = urlSession();
+  if (sessionRows.some((row) => row.id === id)) switchSession(id);
+});
 
 function capturePage() {
   const active = document.activeElement;
@@ -86,7 +120,7 @@ function restorePage(before, options) {
   if (eventStream) eventStream.scrollTop = options.follow ? 0 : before.events ?? 0;
   for (const details of page.querySelectorAll('details')) details.open = before.open.has(disclosureKey(details));
   if (options.clearField) $(options.clearField).value = '';
-  const next = options.focusSelect ? selector : options.focusKey ? keyed(options.focusKey)
+  const next = options.focusKey ? keyed(options.focusKey)
     : $(before.focusId) ?? keyed(before.focusKey);
   if (next && !next.disabled) {
     focus(next);
@@ -102,37 +136,41 @@ async function refresh(options = {}) {
   $('retry').hidden = true;
   page.setAttribute('aria-busy', 'true');
   try {
-    const [rows, snapshot, toolRows, auditRows, settings] = await Promise.all([
-      service.listSessions(), id ? service.getSession(id) : null,
+    const [workspaces, toolRows, auditRows, settings] = await Promise.all([
+      service.listWorkspaces(),
       route === 'tools' ? service.listTools() : null,
-      route === 'audit' ? service.queryAudit({ session_id: filters.scope === 'current' ? id : undefined }) : null,
+      route === 'audit' ? service.queryAudit({ limit: Infinity }) : null,
       route === 'settings' ? service.getSettings() : null,
     ]);
+    const [workspace] = workspaces;
+    const rows = workspace.sessions;
+    const snapshots = await Promise.all((sessionPages.has(route) ? rows.map((row) => row.id)
+      : id && !['tools', 'settings', 'audit'].includes(route) ? [id] : []).map((key) => service.getSession(key)));
+    const snapshot = snapshots.find((s) => s.session.id === id);
     if (version !== loadVersion) return;
     sessionRows = rows;
-    setOptions(sessionRows);
+    $('workspace-name').textContent = workspace.title;
+    renderNavigation(sessionRows);
     const before = capturePage();
     const ui = {
-      sessions: sessionRows, tools: toolRows, audit: auditRows, settings,
+      sessions: sessionRows, snapshots, sessionId: id, chatLink, tools: toolRows, audit: auditRows, settings,
       filters, draftText: drafts.get(id) ?? '',
       draft: (value) => drafts.set(id, value),
       send: (content, demoWrite) => perform(() => service.send(id, content, { demoWrite }), {
         message: demoWrite ? '已生成模拟审批请求。' : '演示消息已发送。', follow: true,
         after: () => drafts.delete(id), focusKey: demoWrite ? 'review' : undefined,
       }),
-      switchSession,
       createSession: (name) => perform(() => service.createSession(name), {
-        message: '已创建演示会话。', after: (row) => switchSession(row.id),
+        redirect: (row) => chatLink(row.id),
       }),
-      resume: (approvalId) => perform(() => service.resume(id, approvalId), {
+      resume: (ownerId, approvalId) => perform(() => service.resume(ownerId, approvalId), {
         message: '已处理演示恢复。', follow: true,
       }),
-      approval: (approval, trigger) => openApproval(id, approval, trigger),
+      approval: openApproval,
       checkpoint: (description) => perform(() => service.createCheckpoint(id, description), {
         message: '已创建演示检查点。', clearField: 'checkpoint-description',
       }),
-      rollback: (point, trigger) => openRollback(id, point, trigger),
-      auditScope: (value) => { filters.scope = value; void refresh(); },
+      rollback: openRollback,
     };
     if (!snapshot && !['tools', 'settings', 'audit'].includes(route)) throw new Error('暂无可查看的会话。');
     views[route](snapshot, ui);
@@ -164,6 +202,7 @@ async function perform(operation, options = {}) {
   if (modal) dialog.setAttribute('aria-busy', 'true');
   try {
     const value = await operation();
+    if (options.redirect) { location.assign(options.redirect(value)); return; }
     options.after?.(value);
     if (modal) {
       returnFocus = null;
@@ -211,22 +250,28 @@ dialog?.addEventListener('keydown', (event) => {
     focus(event.shiftKey ? controls.at(-1) : controls[0]);
   }
 });
-function openApproval(id, approval, trigger) {
+function openApproval(approval, trigger) {
+  const id = approval.session_id;
   const decide = (decision) => perform(() => service.decide(id, approval.id, decision), {
-    modal: true, message: '已记录审批决定；恢复演示轮次后才会继续。', focusKey: 'resume',
+    modal: true, message: '已记录审批决定；恢复演示轮次后才会继续。',
+    focusKey: route === 'approvals' ? `resume:${approval.id}` : 'resume',
     after: () => { if (filters.approval && filters.approval !== decision) filters.approval = ''; },
   });
   openModal(trigger, '需要审批', '审阅模拟工具请求。此处只记录决定，不执行真实操作。',
     el('div', { class: 'stack approval-body' },
-      el('div', { class: 'inset' }, kv([['工具', approval.tool_name], ['审批 ID', approval.id], ['调用 ID', approval.call_id]]),
+      el('div', { class: 'inset' }, kv([['所属会话', ownerLabel(id)], ['工具', approval.tool_name], ['审批 ID', approval.id], ['调用 ID', approval.call_id]]),
         el('h3', {}, '拟提交的参数'), code(approval.arguments)),
       el('p', {}, approval.description), el('span', { class: 'badge pending' }, '操作 · 模拟便笺更新'),
       el('p', { class: 'meta' }, '批准或拒绝后都需要手动恢复轮次；拒绝不会派发此工具。')),
     [button('拒绝', () => decide('denied'), { class: 'danger' }), button('批准', () => decide('approved'), { class: 'primary' })], 'approval');
 }
-function openRollback(id, point, trigger) {
+function ownerLabel(id) {
+  return `${sessionRows.find((row) => row.id === id)?.title ?? '会话'} · ${id}`;
+}
+function openRollback(point, trigger) {
+  const id = point.session_id;
   openModal(trigger, '确认模拟回滚', '这个操作只补偿检查点之后的示例便笺写入。历史和审计不会删除。',
-    kv([['检查点', point.description ?? point.id], ['消息序号', point.seq]]),
+    kv([['所属会话', ownerLabel(id)], ['检查点', point.description ?? point.id], ['消息序号', point.seq]]),
     [button('取消', closeModal), button('确认模拟回滚', () => perform(() => service.rollback(id, point.id), {
       modal: true, message: '已处理模拟回滚。', focusKey: 'rollback-review',
     }), { class: 'danger' })]);
@@ -236,9 +281,18 @@ async function start() {
   error();
   $('retry').hidden = true;
   try {
-    sessionRows = await service.listSessions();
+    const [workspace] = await service.listWorkspaces();
+    sessionRows = workspace.sessions;
+    const requested = urlSession();
     const selected = selectedSession.read();
-    if (sessionRows.length && !sessionId) switchSession((sessionRows.find(({ id }) => id === selected) ?? sessionRows[0]).id);
+    if (requested !== null && !sessionRows.some(({ id }) => id === requested)) {
+      renderNavigation(sessionRows);
+      throw new Error('此标签页找不到链接中的会话；请从工作区历史打开可用会话。');
+    }
+    if (sessionRows.length && !sessionId) {
+      const row = sessionRows.find(({ id }) => id === (requested ?? selected)) ?? sessionRows[0];
+      switchSession(row.id, requested === null ? 'replaceState' : undefined);
+    }
     else await refresh();
   } catch (cause) {
     error(`无法启动演示：${cause.message}`);
