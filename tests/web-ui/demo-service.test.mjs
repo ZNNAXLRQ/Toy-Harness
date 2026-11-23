@@ -22,6 +22,20 @@ test('demo workspace owns its sessions; subagent creation comes from its own sta
   assert.equal(workspace.sessions.length, 3);
 });
 
+test('new session IDs do not resolve in independent instances but survive snapshot reload', async () => {
+  let saved;
+  const first = createDemoService({ save: (snapshot) => { saved = JSON.stringify(snapshot); } });
+  const second = createDemoService();
+  const a = await first.createSession('A');
+  const b = await second.createSession('B');
+
+  assert.notEqual(a.id, b.id);
+  await assert.rejects(first.getSession(b.id), /找不到所选会话/);
+  await assert.rejects(second.getSession(a.id), /找不到所选会话/);
+  const reloaded = createDemoService({ snapshot: JSON.parse(saved) });
+  assert.deepEqual((await reloaded.getSession(a.id)).session, a);
+});
+
 test('tab snapshots preserve approval boundaries, counters, and compensated calls', async () => {
   let saved;
   const open = () => createDemoService({ snapshot: saved && JSON.parse(saved), save: (snapshot) => { saved = JSON.stringify(snapshot); } });

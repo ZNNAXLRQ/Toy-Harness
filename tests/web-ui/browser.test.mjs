@@ -180,6 +180,7 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
   const created = await main.selected();
   await main.opened(created);
   assert.equal(await main.evaluate('document.querySelector("#session-history a").dataset.sessionId'), created);
+  const createdUrl = await main.evaluate('document.querySelector("#session-history a[aria-current]").href');
   await main.evaluate(`document.querySelector('#message').value = '只在新会话'; document.querySelector('#send').click()`);
   await main.waitText('#chat-stream', '收到这条演示消息');
   await main.chat(first);
@@ -294,8 +295,25 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
   await other.waitText('#approval-list', '待决定');
   assert.doesNotMatch(await other.text('#session-history'), /浏览器新会话/);
   assert.equal(await main.evaluate('document.querySelector("#session-select").selectedIndex'), 0);
-  await other.run('Page.navigate', { url: `${origin}/html/index.html?session=${created}` });
+  await other.click('.new-link');
+  await other.ready('sessions');
+  await other.evaluate(`document.querySelector('#new-session').value = '独立标签页新会话'; document.querySelector('#new-session-form').requestSubmit()`);
+  await other.ready('index');
+  const otherCreated = await other.selected();
+  await other.opened(otherCreated);
+  const otherUrl = await other.evaluate('document.querySelector("#session-history a[aria-current]").href');
+
+  await other.run('Page.navigate', { url: createdUrl });
   await other.waitText('#error', '找不到链接中的会话');
+  await main.run('Page.navigate', { url: otherUrl });
+  await main.waitText('#error', '找不到链接中的会话');
+  await main.run('Page.navigate', { url: createdUrl });
+  await main.opened(created);
+  await main.waitText('#chat-stream', '只在新会话');
+  await other.run('Page.navigate', { url: otherUrl });
+  await other.opened(otherCreated);
+  await other.waitText('#chat-stream', '空会话');
+
   await other.chat(interrupted);
   await other.go('context');
   await other.waitText('#context-session', '中断恢复示例');
