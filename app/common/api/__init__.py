@@ -20,7 +20,7 @@
 from app.common.api.agent_loop import AgentLoop, TurnOutcome
 from app.common.api.agents_md_loader import AgentsDocument, AgentsMdLoader
 from app.common.api.approval_service import ApprovalService
-from app.common.api.audit_service import AuditEntry, AuditService
+from app.common.api.audit_service import AuditService
 from app.common.api.context_manager import ContextManager, PreparedContext
 from app.common.api.llm_provider import CompletionRequest, LLMProvider, ModelResponse, ModelToolCall
 from app.common.api.rollback_service import (
@@ -36,6 +36,7 @@ from app.common.api.state_store import (
     ApprovalStatus,
     ApprovalView,
     AssistantTurn,
+    AuditView,
     MessageRole,
     MessageView,
     SessionStatus,
@@ -48,6 +49,7 @@ from app.common.api.state_store import (
 )
 from app.common.api.subagent_scheduler import (
     SubagentResult,
+    SubagentRunStatus,
     SubagentRunStore,
     SubagentRunView,
     SubagentScheduler,
@@ -65,7 +67,7 @@ __all__ = [
     "ApprovalStatus",
     "ApprovalService",
     "ApprovalView",
-    "AuditEntry",
+    "AuditView",
     "AuditService",
     "ContextManager",
     "PreparedContext",
@@ -90,6 +92,7 @@ __all__ = [
     "TurnState",
     "TurnStatus",
     "SubagentResult",
+    "SubagentRunStatus",
     "SubagentRunStore",
     "SubagentRunView",
     "SubagentScheduler",

@@ -22,15 +22,23 @@
        │              │                              
        └──────────────┴─→ denied（审批拒绝，工具从未派发）
 
+**两种状态只能由专门的写入方法产生，``set_tool_status`` 一律拒绝**：
+
+- ``awaiting_approval`` ← ``record_approval_request``（审批行与状态同事务）；
+- ``approved`` / ``dispatched`` ← ``claim_tool_call`` 的条件迁移。
+
+这样"等待审批但没有审批记录"这种不可恢复状态在实现上就无法被构造出来。
+
 **只有通过 ``claim_tool_call`` 条件迁移（CAS）的那一方可以执行工具**：并发恢复时
-第二个调用者拿到 ``False``，因此不存在重复派发。``set_tool_status`` **不允许**把状态
-写到 ``dispatched``——绕过 CAS 直接派发正是重复执行的入口。``claim_tool_call`` 在
+第二个调用者拿到 ``False``，因此不存在重复派发。``claim_tool_call`` 在
 SQLite 实现里必须是**单条条件更新**（``UPDATE ... WHERE status = :from``，按
 ``rowcount`` 判定），不得读-改-写。
 
 ``approved`` 不等于可执行：恢复流程用两次 CAS 完成一次性派发——
 ``awaiting_approval → approved``（抢到的人消费审批）、``approved → dispatched``
 （抢到的人执行）。第二次失败就说明别人已经派发过，必须放弃。
+**消费那次 CAS 必须校验审批记录确为 approved**：没有已批准的审批就不许进入
+``approved``，否则未批准的工具会被执行。
 
 **审批拒绝即终止本轮。** ``denied`` 是安全边界：模型不能靠「换个工具再来」绕开拒绝。
 因此一轮里只要出现 ``denied`` 调用，恢复推导就认为该轮没有 open turn（见下），
@@ -44,20 +52,24 @@ SQLite 实现里必须是**单条条件更新**（``UPDATE ... WHERE status = :f
 - ``sessions.status`` 为 ``failed`` / ``abandoned`` → 没有 open turn（``None``）。
   只有这两个是硬终态；``idle`` / ``completed`` 不阻断推导——一轮完成后用户再发消息
   就是新一轮。
-- 本轮存在 ``awaiting_approval``：
-  - 能找到对应审批记录且**已决策** → ``WAITING_APPROVAL``，并同时给出
-    ``pending_call_id`` 与 ``pending_approval_id``（重启后靠它恢复，见 agent_loop）；
-  - 未决策 → ``WAITING_APPROVAL``，只给 ``pending_call_id``。
-  **同一时刻最多一条**；实现发现两条及以上必须抛 ``StateError``。
-- 本轮存在 ``pending`` / ``approved`` 的调用 → ``OPEN``（模型已回、工具未派发，
-  或审批已消费待派发）。**这两态必须有恢复路径**，否则崩在派发前就会丢轮；
-  ``approved`` 表示审批已消费、等派发，loop 恢复时用 ``claim_tool_call(approved→dispatched)``
-  抢占执行权。
-- 本轮出现过 ``denied`` 调用 → 没有 open turn（``None``）；拒绝是安全边界。
-- 本轮有 ``dispatched`` 而无观察结果 → 判 ``unknown``，落会话 ``failed``，返回带
+- 本轮存在 ``dispatched`` 而无观察结果 → 判 ``unknown``，落会话 ``failed``，返回带
   ``notes["unknown_calls"]`` 的 ``FAILED``（**唯一一处恢复写**，幂等，判过即不可恢复）。
   注意：这是**破坏性**判定，只允许由「启动恢复」入口独占调用；普通查询应使用
   ``peek_open_turn``（见 ``AgentLoop`` 的调用者约束）。
+- 本轮出现过 ``denied`` 调用 → 没有 open turn（``None``）；拒绝是安全边界。
+  （判定顺序如此：拒绝的优先级高于「还有调用在等审批」，两者同时出现是异常状态，
+  按终止处理。）
+- 本轮存在 ``awaiting_approval``：
+  - 审批记录已决策（approved/denied）→ ``WAITING_APPROVAL``，同时给出
+    ``pending_call_id`` 与 ``pending_approval_id``（重启后据此恢复）；
+  - 未决策 → ``WAITING_APPROVAL``，``pending_approval_id=None``。
+  **同一时刻最多一条**；实现发现两条及以上必须抛 ``StateError``。
+  （``awaiting_approval`` 只能由 ``record_approval_request`` 产生，所以这里的
+  "未决策"必然能找到审批行；找不到说明实现漏了事务。）
+- 本轮存在 ``pending`` / ``approved`` 的调用 → ``OPEN``（模型已回、工具未派发，
+  或审批已消费待派发），**并在 ``open_call_ids`` 里给出这些调用**。``approved``
+  表示审批已消费、等派发，loop 恢复时按 ``open_call_ids`` 用
+  ``claim_tool_call(approved→dispatched)`` 抢占执行权。
 - 以上都不满足时看最后一条**非 summary/system** 消息：``user`` / ``tool`` → ``OPEN``
   （模型还没回复，或工具结果已落等待下一次模型调用）；``assistant`` → ``None``。
   ``summary`` 是压缩注记，既不能重开已结束的轮次，也不能把进行中的轮次误判为结束。
@@ -129,7 +141,7 @@ TOOL_TRANSITIONS: dict[ToolCallStatus, frozenset[ToolCallStatus]] = {
     ToolCallStatus.AWAITING_APPROVAL: frozenset(
         {ToolCallStatus.APPROVED, ToolCallStatus.DENIED}
     ),
-    ToolCallStatus.APPROVED: frozenset({ToolCallStatus.DISPATCHED, ToolCallStatus.DENIED}),
+    ToolCallStatus.APPROVED: frozenset({ToolCallStatus.DISPATCHED}),
     ToolCallStatus.DISPATCHED: frozenset({ToolCallStatus.COMPLETED, ToolCallStatus.FAILED}),
     ToolCallStatus.DENIED: frozenset(),
     ToolCallStatus.COMPLETED: frozenset(),
@@ -221,6 +233,21 @@ class ApprovalView(Protocol):
     decided_at: int | None
 
 
+class AuditView(Protocol):
+    """``audit_logs`` 表的一行（C 的 dataclass 自动满足）。
+
+    ``detail`` 是 JSON 文本（或纯字符串），由写入方序列化、读取方解析；
+    **审计内容必须经 ``redact`` 处理**（见 ``AuditService``）。
+    """
+
+    id: str
+    session_id: str | None
+    actor: str
+    action: str
+    detail: str | None
+    created_at: int
+
+
 @dataclass
 class TurnState:
     """一轮执行的投影，由 ``StateStore.load_open_turn`` 重建（不落库）。"""
@@ -232,6 +259,11 @@ class TurnState:
     pending_call_id: str | None = None
     pending_approval_id: str | None = None
     """挂起时对应的审批记录 id；已决策未消费时用于重启恢复。"""
+    open_call_ids: tuple[str, ...] = ()
+    """本轮还没终态的调用 id（``pending`` / ``approved`` / 在飞 ``dispatched``）。
+
+    ``OPEN`` 态必须靠它恢复：loop 按顺序对每个 id 重新做 CAS，不能重新推导轮次。
+    """
     notes: dict[str, Any] = field(default_factory=dict)
 
 
@@ -274,7 +306,11 @@ class StateStore(Protocol):
         *,
         tool_call_id: str | None = None,
     ) -> MessageView:
-        """追加 user / summary / system 等消息；工具消息由 ``finish_tool_call`` 负责。"""
+        """追加 user / summary / system 等消息；工具消息由 ``finish_tool_call`` 负责。
+
+        会话处于 ``failed`` / ``abandoned`` 时抛 ``ConflictError``（不能往终止的轮次里
+        追加消息）。
+        """
         ...
 
     async def record_assistant_turn(
@@ -284,6 +320,7 @@ class StateStore(Protocol):
 
         ``reasoning_content`` 不落库（schema 无列）；重复的 call id、或与已存在
         call id 冲突时抛 ``StateError``，且**不留下半条消息**。
+        会话处于 ``failed`` / ``abandoned`` 时抛 ``ConflictError``。
         """
         ...
 
@@ -299,9 +336,10 @@ class StateStore(Protocol):
     ) -> ToolCallView:
         """按 ``TOOL_TRANSITIONS`` 迁移；终态迁出、非法迁移抛 ``StateError``。
 
-        **不允许**迁移到 ``dispatched``（抛 ``StateError``）：派发必须走
-        ``claim_tool_call``。也不允许迁移到 ``approved``——消费审批同样是一次 CAS，
-        只有这样「两个恢复者同时消费同一条审批」才有一方必然失败。
+        **不允许**迁移到 ``awaiting_approval`` / ``approved`` / ``dispatched``
+        （均抛 ``StateError``）：等待审批只能由 ``record_approval_request`` 产生，
+        approved/dispatched 只能由 ``claim_tool_call`` 产生。否则可以造出
+        「等待审批但没有审批记录」的不可恢复状态。
         """
         ...
 
@@ -315,18 +353,24 @@ class StateStore(Protocol):
         """条件迁移（CAS）：当前状态等于 ``from_status`` 才改成 ``to_status``。
 
         只允许两种用途：
-        - 消费审批：``awaiting_approval → approved``；
+        - 消费审批：``awaiting_approval → approved``——**必须校验审批记录已为
+          approved**，否则抛 ``ConflictError``；没有这条校验，未批准的工具可以直接
+          被消费并执行。
         - 派发执行：``approved → dispatched`` / ``pending → dispatched``。
 
         返回 ``True`` 的那一方是**唯一**允许继续的人；并发恢复的其余调用者拿到
         ``False``，不会重复消费审批或重复派发。**会话已处于 ``failed``/``abandoned``
         时抛 ``ConflictError``**——否则副作用会发生而没有观察结果可以落。
-        其他迁移（拒绝、失败、完成）一律走 ``set_tool_status``/``finish_tool_call``，
+        其他迁移（拒绝、失败、完成）一律走 ``finish_tool_call``，
         传非法 ``from/to`` 组合必须抛 ``StateError``。
 
         SQLite 实现必须用单条条件更新判定，不得先查后写：
 
-            UPDATE tool_calls SET status=:to WHERE id=:id AND status=:from
+            UPDATE tool_calls
+               SET status = :to
+             WHERE id = :id AND status = :from
+               AND (:to <> 'approved' OR EXISTS (
+                     SELECT 1 FROM approvals WHERE call_id = :id AND status = 'approved'))
 
         ``rowcount == 1`` 即抢到。
         """
@@ -365,8 +409,11 @@ class StateStore(Protocol):
     ) -> ApprovalView:
         """同事务完成两件事：插审批行（status=pending）+ 把调用置 ``awaiting_approval``。
 
-        按 ``call_id`` 唯一：重复调用返回已有记录（幂等），不改状态。
-        调用必须处于 ``pending``，否则抛 ``StateError``。
+        按 ``call_id`` 唯一：重复调用直接返回已有记录（幂等），不改状态。
+        调用必须处于 ``pending`` 且属于同一会话，否则抛 ``StateError``；
+        ``tool_name`` / ``arguments`` 应与该 tool_call 行一致，不一致抛 ``StateError``
+        （防止审批记录与真实调用对不上）。
+        会话处于 ``failed`` / ``abandoned`` 时抛 ``ConflictError``。
         """
         ...
 
@@ -375,9 +422,14 @@ class StateStore(Protocol):
     ) -> ApprovalView:
         """同事务写入决策（approved/denied）与 ``audit_logs`` 审计行。
 
-        已决策的记录再决策抛 ``ApprovalError``；**本方法不改 tool_calls 状态**——
-        审批消费是一次独立的 CAS（``awaiting_approval → approved``），避免
-        "决策成功但没人执行" 或 "执行了但没有决策记录"。
+        - 已决策的记录再决策抛 ``ApprovalError``；
+        - 调用已不是 ``awaiting_approval``（例如已被派发）时抛 ``ConflictError``；
+        - 会话处于 ``failed`` / ``abandoned`` 时抛 ``ConflictError``；
+        - **本方法不改 tool_calls 状态**——审批消费是一次独立的 CAS
+          （``awaiting_approval → approved``），避免"决策成功但没人执行"或
+          "执行了但没有决策记录"。
+        - 审计行必须是：``action='approval_decided'``、``actor=决策人``、
+          ``detail`` 含 ``approval_id`` 与 ``decision``（JSON 文本）。
         """
         ...
 
@@ -390,7 +442,37 @@ class StateStore(Protocol):
     async def list_pending_approvals(
         self, session_id: str | None = None
     ) -> Sequence[ApprovalView]:
-        """未决策的审批队列；Web 用它渲染审批列表。"""
+        """未决策的审批队列，按 ``created_at`` 升序；Web 用它渲染审批列表。"""
+        ...
+
+    # --- 审计（audit_logs 表） ---
+    async def record_audit(
+        self,
+        *,
+        action: str,
+        actor: str,
+        session_id: str | None = None,
+        detail: str | None = None,
+    ) -> AuditView:
+        """写一条审计。``detail`` 是已经序列化好（且已脱敏）的文本。
+
+        审计是**不可变**的：没有对应的 update/delete 方法。写失败必须抛异常，
+        不允许静默吞掉——「查不到谁批的」比「turn 失败」更严重。
+        """
+        ...
+
+    async def query_audits(
+        self, *, session_id: str | None = None, limit: int = 100
+    ) -> Sequence[AuditView]:
+        """按 ``created_at`` 升序返回审计；``session_id=None`` 表示全部。
+
+        这个方法是审计不变式的**验收通道**：``decide_approval`` 之后必须能查到
+        ``approval_decided`` 行。
+        """
+        ...
+
+    async def latest_message_seq(self, session_id: str) -> int:
+        """会话当前最大消息序号（没有消息时 0）。检查点用它确定打点位置。"""
         ...
 
     # --- 一轮 ---

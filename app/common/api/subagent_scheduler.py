@@ -17,7 +17,28 @@
 """
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Mapping, Protocol, Sequence
+
+
+class SubagentRunStatus(StrEnum):
+    """``subagent_runs.status`` 的合法取值。
+
+    - ``running``：已落库、执行中；
+    - ``success`` / ``failed`` / ``cancelled``：终态；
+    - ``unknown``：进程崩溃遗留的 ``running``，恢复时改判，**不自动重试**。
+    """
+
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+
+TERMINAL_SUBAGENT_STATUSES = frozenset(
+    {SubagentRunStatus.SUCCESS, SubagentRunStatus.FAILED, SubagentRunStatus.CANCELLED, SubagentRunStatus.UNKNOWN}
+)
 
 
 @dataclass(frozen=True)
@@ -95,4 +116,12 @@ class SubagentScheduler(Protocol):
         """当前仍在运行（或崩溃后判为 unknown 待确认）的子任务。"""
         ...
 
-    async def cancel(self, run_id: str) -> None: ...
+    async def cancel(self, run_id: str) -> None:
+        """请求取消一个运行。
+
+        语义：``cancel`` 只置取消标志并把 run 记为 ``cancelled``（若尚未终态）；
+        正在等待的 ``spawn`` 以 ``SubagentResult(status="cancelled")`` **正常返回**
+        （不抛 ``asyncio.CancelledError``），便于父循环把结果写回父会话。
+        已终态的 run 调 ``cancel`` 是空操作。
+        """
+        ...

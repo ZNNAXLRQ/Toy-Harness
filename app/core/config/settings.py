@@ -73,6 +73,13 @@ class WorkspaceSettings(BaseModel):
     path: str = "./workspace"
     """工具的工作区根目录；相对路径按项目根解析（与 database.path 一致）。"""
 
+    @field_validator("path")
+    @classmethod
+    def _non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("workspace.path must not be empty")
+        return value
+
 
 class AgentSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -333,7 +340,40 @@ def load_env(path: Path = ENV_FILE) -> None:
         load_dotenv(path, override=False)
 
 
+KNOWN_SECTIONS = frozenset(
+    {"server", "database", "workspace", "llm", "agent", "subagent", "logging"}
+)
+"""配置里允许出现的顶层 section。新增 section 必须同时改这里（见 extra="forbid"）。"""
+
+
+def check_env_sections() -> None:
+    """检查 ``HARNESS_*`` 环境变量的 section 名是否拼对。
+
+    pydantic-settings 对拼错的环境变量段名是**静默忽略**的（``HARNESS_LLMM__ACTIVE``
+    不会报错，只会让人以为切了厂商其实没有）。YAML 侧靠 ``extra="forbid"`` 挡住了，
+    环境变量侧只能自己扫一遍。
+    """
+    unknown = {}
+    for key in os.environ:
+        if not key.startswith("HARNESS_"):
+            continue
+        section = key[len("HARNESS_") :].split("__", 1)[0].lower()
+        if section and section not in KNOWN_SECTIONS:
+            unknown[key] = section
+    if unknown:
+        listing = ", ".join(f"{key}（section={section!r}）" for key, section in sorted(unknown.items()))
+        raise ConfigError(
+            f"未知的配置 section：{listing}；允许的 section 是 {sorted(KNOWN_SECTIONS)}",
+            detail={"unknown": sorted(unknown)},
+        )
+
+
 def load_settings() -> HarnessSettings:
-    """读取配置；``config/config.yaml`` 缺失或为空都能返回一份可用的默认配置。"""
+    """读取配置；``config/config.yaml`` 缺失或为空都能返回一份可用的默认配置。
+
+    额外做一次环境变量 section 名校验（拼错的 ``HARNESS_*`` 会被 pydantic-settings
+    静默忽略，这里补上）。
+    """
     load_env()
+    check_env_sections()
     return HarnessSettings()

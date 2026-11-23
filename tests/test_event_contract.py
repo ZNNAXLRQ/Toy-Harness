@@ -58,3 +58,21 @@ def test_created_at_is_milliseconds():
 
     assert isinstance(event.created_at, int)
     assert abs(event.created_at - int(time.time() * 1000)) < 5_000
+
+
+def test_redaction_does_not_touch_payload_keys():
+    """先校验后脱敏、只脱敏值：否则密钥值恰好等于键名时会被误判为非法 payload。"""
+    import os
+
+    os.environ["MY_TEST_SECRET"] = "call_id"
+    try:
+        event = AgentEvent(
+            type=EventType.TOOL_START,
+            session_id="s1",
+            payload={"call_id": "c1", "name": "read_file"},
+        )
+    finally:
+        del os.environ["MY_TEST_SECRET"]
+
+    assert "call_id" in event.payload
+    assert event.payload["call_id"] == "c1"

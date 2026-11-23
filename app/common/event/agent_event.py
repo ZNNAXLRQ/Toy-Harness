@@ -4,12 +4,13 @@
 ``approvals``。因此事件可以丢、可以重发，客户端断线后拉 REST 即可对齐。
 ``seq`` 取对应的 ``messages.seq``，让前端能把一条事件钉在会话时间线的正确位置。
 
-两个强制保证（本版补上）：
+两个强制保证：
 
-1. **构造即脱敏**：``payload`` 在 ``__post_init__`` 里统一经 ``redact_value`` 处理，
-   工具参数、provider 错误体里的密钥不会进 SSE；
-2. **构造即校验**：payload 的键必须在 ``PAYLOAD_FIELDS[type]`` 内、必填键必须在
-   ``REQUIRED_PAYLOAD_FIELDS[type]`` 内，否则 ``ValueError``——避免"每个层各塞各的"。
+1. **构造即校验**：payload 的键必须在 ``PAYLOAD_FIELDS[type]`` 内、必填键必须在
+   ``REQUIRED_PAYLOAD_FIELDS[type]`` 内，否则 ``ValueError``。
+2. **构造即脱敏**：**先校验、后脱敏，且只脱敏值不脱敏键**。顺序反了会出现一个隐蔽
+   bug——如果某个 ``*_SECRET`` 环境变量的值恰好等于 payload 键名，键会被替换成
+   ``[REDACTED]``，于是校验报「unexpected payload keys」，看起来像代码错误。
 
 时间统一用 **int 毫秒**（与数据库实体一致），不要混 float 秒。
 """
@@ -40,8 +41,10 @@ class AgentEvent:
     created_at: int = field(default_factory=_now_ms)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "payload", redact_value(dict(self.payload)))
         self.validate_payload()
+        # 先校验后脱敏、只脱敏值：键是契约的一部分，不能被动过。
+        redacted = {key: redact_value(value) for key, value in self.payload.items()}
+        object.__setattr__(self, "payload", redacted)
 
     def validate_payload(self) -> None:
         event_type = EventType(self.type)

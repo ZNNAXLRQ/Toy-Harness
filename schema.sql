@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_messages_session_seq ON messages(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_logs(session_id);
 CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id, status);

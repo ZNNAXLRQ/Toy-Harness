@@ -258,9 +258,14 @@ class MemoryStateStore:
         row = self._calls.get(call_id)
         if row is None:
             raise NotFoundError(f"tool call {call_id} not found")
-        if status in (ToolCallStatus.DISPATCHED, ToolCallStatus.APPROVED):
+        if status in (
+            ToolCallStatus.DISPATCHED,
+            ToolCallStatus.APPROVED,
+            ToolCallStatus.AWAITING_APPROVAL,
+        ):
             raise StateError(
-                f"{call_id}: {status} must go through claim_tool_call, not set_tool_status"
+                f"{call_id}: {status} must not be set via set_tool_status "
+                "(awaiting comes from record_approval_request, approved/dispatched from claim)"
             )
         current = ToolCallStatus(row.status)
         if status not in TOOL_TRANSITIONS[current]:
@@ -289,6 +294,12 @@ class MemoryStateStore:
             raise ConflictError(
                 f"session {row.session_id} is {session.status}; cannot claim {call_id}"
             )
+        if to_status == ToolCallStatus.APPROVED:
+            approval = self._approval_for_call(call_id)
+            if approval is None or approval.status != ApprovalStatus.APPROVED.value:
+                raise ConflictError(
+                    f"{call_id}: approval must be decided as approved before consuming it"
+                )
         if row.status != from_status.value:
             return False
         row.status = to_status.value
@@ -341,14 +352,26 @@ class MemoryStateStore:
         arguments: str | None,
         description: str | None,
     ) -> _Approval:
-        if session_id not in self._sessions:
+        session = self._sessions.get(session_id)
+        if session is None:
             raise NotFoundError(f"session {session_id} not found")
+        if session.status in {status.value for status in TERMINAL_SESSION_STATUSES}:
+            raise ConflictError(
+                f"session {session_id} is {session.status}; cannot request approval"
+            )
         existing = self._approval_for_call(call_id)
         if existing is not None:
             return existing
         row = self._calls.get(call_id)
         if row is None:
             raise NotFoundError(f"tool call {call_id} not found")
+        if row.session_id != session_id:
+            raise StateError(f"tool call {call_id} does not belong to session {session_id}")
+        if row.tool_name != tool_name or row.arguments != arguments:
+            raise StateError(
+                f"approval payload does not match tool call {call_id} "
+                "(tool_name/arguments must be copied from the call row)"
+            )
         if row.status != ToolCallStatus.PENDING.value:
             raise StateError(f"tool call {call_id} is {row.status}, cannot request approval")
         approval = _Approval(
@@ -376,6 +399,13 @@ class MemoryStateStore:
         if approval.status != ApprovalStatus.PENDING.value:
             raise ApprovalError(
                 f"approval {approval_id} already decided as {approval.status}"
+            )
+        session = self._sessions.get(approval.session_id)
+        if session is not None and session.status in {
+            status.value for status in TERMINAL_SESSION_STATUSES
+        }:
+            raise ConflictError(
+                f"session {approval.session_id} is {session.status}; cannot decide approval"
             )
         call = self._calls.get(approval.call_id)
         if call is None:
@@ -427,6 +457,41 @@ class MemoryStateStore:
             if approval.call_id == call_id:
                 return approval
         return None
+
+    # --- 审计 ---
+
+    async def record_audit(
+        self,
+        *,
+        action: str,
+        actor: str,
+        session_id: str | None = None,
+        detail: str | None = None,
+    ) -> _Audit:
+        row = _Audit(
+            id=uuid4().hex,
+            session_id=session_id,
+            actor=actor,
+            action=action,
+            detail=detail,
+            created_at=_now(),
+        )
+        self._audits.append(row)
+        return row
+
+    async def query_audits(
+        self, *, session_id: str | None = None, limit: int = 100
+    ) -> Sequence[_Audit]:
+        rows = [
+            row
+            for row in self._audits
+            if session_id is None or row.session_id == session_id
+        ]
+        return rows[-limit:]
+
+    async def latest_message_seq(self, session_id: str) -> int:
+        messages = self._messages.get(session_id, [])
+        return messages[-1].seq if messages else 0
 
     # --- 一轮 ---
 
@@ -481,14 +546,15 @@ class MemoryStateStore:
             )
 
         open_calls = [c for c in turn_calls if c.status in {s.value for s in OPEN_TOOL_STATUSES}]
+        open_call_ids = tuple(call.id for call in open_calls)
+        if any(c.status == ToolCallStatus.DENIED.value for c in turn_calls):
+            return None
         awaiting = [c for c in open_calls if c.status == ToolCallStatus.AWAITING_APPROVAL.value]
         if len(awaiting) > 1:
             raise StateError(
                 "more than one call is awaiting approval in a single turn: "
                 + ", ".join(call.id for call in awaiting)
             )
-        if any(c.status == ToolCallStatus.DENIED.value for c in turn_calls):
-            return None
         if awaiting:
             call = awaiting[0]
             approval = self._approval_for_call(call.id)
@@ -499,9 +565,15 @@ class MemoryStateStore:
                 iteration=iteration,
                 pending_call_id=call.id,
                 pending_approval_id=approval.id if decided else None,
+                open_call_ids=open_call_ids,
             )
         if open_calls:
-            state = TurnState(session_id=session_id, status=TurnStatus.OPEN, iteration=iteration)
+            state = TurnState(
+                session_id=session_id,
+                status=TurnStatus.OPEN,
+                iteration=iteration,
+                open_call_ids=open_call_ids,
+            )
             if in_flight:
                 state.notes["in_flight"] = list(in_flight)
             return state

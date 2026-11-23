@@ -369,3 +369,31 @@ def test_workspace_path_resolves_against_project_root(config_file):
     config_file.write_text("workspace:\n  path: ./workspace\n", encoding="utf-8")
 
     assert HarnessSettings().workspace_path() == (PROJECT_ROOT / "workspace").resolve()
+
+# --- 环境变量 section 名校验 / workspace 空路径 ---
+
+
+def test_unknown_env_section_is_rejected(monkeypatch):
+    """pydantic-settings 会静默忽略拼错的 HARNESS_ 段名，必须自己扫出来。"""
+    from app.core.config.settings import load_settings
+
+    monkeypatch.setenv("HARNESS_LLMM__ACTIVE", "openai")
+
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_known_env_section_is_accepted(monkeypatch, config_file):
+    from app.core.config.settings import load_settings
+
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_LOGGING__LEVEL", "debug")
+
+    assert load_settings().logging.level == "DEBUG"
+
+
+def test_empty_workspace_path_is_rejected(config_file):
+    config_file.write_text('workspace:\n  path: "  "\n', encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()

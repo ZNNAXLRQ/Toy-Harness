@@ -15,16 +15,19 @@
     ``waiting_approval``、且该审批**已决策**；
   - 没传：用 ``StateStore.get_approval_for_call(pending_call_id)`` 找回
     「已决策未消费」的审批（重启后靠这条恢复）。
-- 消费与派发各是一次 CAS：``claim_tool_call(awaiting→approved)`` 抢占审批消费权，
-  ``claim_tool_call(approved→dispatched)`` 抢占派发权。**只有抢到派发权的一方才执行
-  工具**；抢不到说明别人已经在执行，本调用者必须放弃（返回 ``ConflictError`` 或
-  ``waiting``，不许重试执行）。
-- 崩在两次 CAS 之间（``approved`` 态）时，调用仍可恢复：恢复入口返回 ``OPEN``，
-  ``resume_turn`` 从 ``approved→dispatched`` 继续派发。
+- 消费与派发各是一次 CAS：``claim_tool_call(awaiting→approved)`` 抢占审批消费权
+  （**store 会校验审批记录必须是 approved**），``claim_tool_call(approved→dispatched)``
+  抢占派发权。**只有抢到派发权的一方才执行工具**；抢不到说明别人已经在执行，
+  本调用者必须放弃（返回 ``ConflictError`` 或 ``waiting``，不许重试执行）。
+- 崩在两次 CAS 之间（``approved`` 态）时，恢复入口返回 ``OPEN`` 且
+  ``TurnState.open_call_ids`` 里带着该调用；loop **按这些 id 逐个重新 CAS**，
+  不需要自己再推导「哪些调用属于本轮」。
 - 恢复时遇到 ``dispatched`` 但无观察结果的调用，判 ``unknown`` 并交给人工，不重放；
   该判定由 ``load_open_turn`` 独占执行，UI/只读查询用 ``peek_open_turn``。
 - 派发时按 ``call.tool_name`` 从注册表取实现，注册表禁止同名覆盖，因此批准时看到的
   工具与执行时拿到的是同一个实现。
+- 审批决策的审计由 ``StateStore.decide_approval`` 在同一事务写入；loop 不要再重复
+  写 ``approval_decided``。
 """
 
 from dataclasses import dataclass
