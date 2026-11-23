@@ -76,3 +76,21 @@ def test_redaction_does_not_touch_payload_keys():
 
     assert "call_id" in event.payload
     assert event.payload["call_id"] == "c1"
+
+
+def test_redaction_keeps_nested_keys(monkeypatch):
+    """嵌套 dict/list 的键也不能被脱敏改写，否则前端按字段取值会失败。"""
+    import os
+
+    monkeypatch.setenv("MY_TEST_SECRET", "stdout")
+    try:
+        event = AgentEvent(
+            type=EventType.TOOL_END,
+            session_id="s1",
+            payload={"call_id": "c1", "status": "success", "result": {"stdout": "hello", "n": 1}},
+        )
+    finally:
+        del os.environ["MY_TEST_SECRET"]
+
+    assert event.payload["result"]["stdout"] == "hello"
+    assert event.payload["result"]["n"] == 1

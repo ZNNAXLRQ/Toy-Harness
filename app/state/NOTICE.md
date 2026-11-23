@@ -6,7 +6,7 @@
 2. `schema.sql` —— 已由 A 写全（含新增的 `approvals` 表、`messages(session_id, seq)` 唯一索引）；
    这是唯一建表来源，字段语义看 `app/common/api/state_store.py` 的视图与注释。
 3. `tests/contracts/conftest.py` —— 你的接入点：把 `_sqlite_store()` 从 skip 换成实现构造，
-   56 条用例红转绿即验收。
+   59 条用例红转绿即验收。
 
 ## 为什么新增了 approvals 表
 
@@ -23,4 +23,7 @@
 4. 终态不可迁出；`set_tool_status` 不允许写 awaiting/approved/dispatched；
 5. `load_open_turn` 是恢复入口（会写库），只读查询用 `peek_open_turn`；
    `TurnState.open_call_ids` 必须填（loop 靠它恢复派发）；
-6. `decide_approval` 写的审计行必须能被 `query_audits` 查到（契约测试验收点）。
+6. `decide_approval` 写的审计行必须能被 `query_audits` 查到（契约测试验收点）；
+   `query_audits` 返回**最新** limit 条（升序，limit>=1），不是最早；
+7. `expire_pending_approvals` 在放弃轮次时把 pending 审批置 denied 并写
+   `approval_expired` 审计；`list_pending_approvals` 不返回终态会话的遗留审批。

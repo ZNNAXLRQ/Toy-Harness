@@ -16,6 +16,9 @@
 - **重连快照**：会话状态 / messages / tool-calls / pending approvals 四类都要拉，
   只拉 messages 会漏掉审批与工具状态。
 - **只读接口不要调 `load_open_turn`**（会把在飞调用判 UNKNOWN 并写库）；用 `peek_open_turn`。
+- `WAITING_APPROVAL` + `pending_approval_id` 非空 = **已决策、待恢复执行**（可能是
+  approved 或 denied），页面显示「恢复中」，不要再列审批按钮；abandon 后的待审批已被
+  过期，重连快照里不应出现。
 
 ## 另外两件事
 

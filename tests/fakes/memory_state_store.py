@@ -445,12 +445,44 @@ class MemoryStateStore:
     async def list_pending_approvals(
         self, session_id: str | None = None
     ) -> Sequence[_Approval]:
+        terminal_sessions = {
+            row.id
+            for row in self._sessions.values()
+            if row.status in {status.value for status in TERMINAL_SESSION_STATUSES}
+        }
         return [
             approval
             for approval in self._approvals.values()
             if approval.status == ApprovalStatus.PENDING.value
+            and approval.session_id not in terminal_sessions
             and (session_id is None or approval.session_id == session_id)
         ]
+
+    async def expire_pending_approvals(
+        self, session_id: str, *, actor: str
+    ) -> Sequence[_Approval]:
+        expired = []
+        for approval in self._approvals.values():
+            if approval.session_id != session_id or approval.status != ApprovalStatus.PENDING.value:
+                continue
+            approval.status = ApprovalStatus.DENIED.value
+            approval.decided_by = actor
+            approval.decided_at = _now()
+            self._audits.append(
+                _Audit(
+                    id=uuid4().hex,
+                    session_id=session_id,
+                    actor=actor,
+                    action="approval_expired",
+                    detail=json.dumps(
+                        {"approval_id": approval.id, "call_id": approval.call_id},
+                        ensure_ascii=False,
+                    ),
+                    created_at=_now(),
+                )
+            )
+            expired.append(approval)
+        return expired
 
     def _approval_for_call(self, call_id: str) -> _Approval | None:
         for approval in self._approvals.values():
@@ -482,6 +514,8 @@ class MemoryStateStore:
     async def query_audits(
         self, *, session_id: str | None = None, limit: int = 100
     ) -> Sequence[_Audit]:
+        if limit < 1:
+            raise StateError(f"query_audits limit must be >= 1, got {limit}")
         rows = [
             row
             for row in self._audits

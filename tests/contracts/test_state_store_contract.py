@@ -747,3 +747,39 @@ async def test_pending_call_reports_open_call_ids(store):
 
     assert state is not None and state.status == TurnStatus.OPEN
     assert state.open_call_ids == ("call-1", "call-2")
+
+# --- 审计 limit 语义与审批过期 ---
+
+
+async def test_query_audits_returns_latest_n_in_ascending_order(store):
+    session = await store.create_session()
+    for index in range(3):
+        await store.record_audit(action=f"a{index}", actor="system", session_id=session.id)
+
+    rows = await store.query_audits(session_id=session.id, limit=2)
+
+    assert [row.action for row in rows] == ["a1", "a2"]
+
+
+async def test_query_audits_rejects_non_positive_limit(store):
+    with pytest.raises(StateError):
+        await store.query_audits(limit=0)
+
+
+async def test_abandoned_session_pending_approvals_are_expired_and_hidden(store):
+    """放弃一轮后，待审批要过期并写审计，不能留在重连快照里变成幽灵项。"""
+    session = await _turn_with_calls(store, "call-1")
+    approval = await _request_approval(store, session.id, "call-1")
+    await store.update_session(session.id, status=SessionStatus.ABANDONED.value)
+
+    # 终态会话的遗留审批不再出现在待审批队列里
+    assert await store.list_pending_approvals(session.id) == []
+
+    expired = await store.expire_pending_approvals(session.id, actor="system:abandon")
+    assert [row.id for row in expired] == [approval.id]
+
+    rows = list(await store.query_audits(session_id=session.id))
+    assert any(row.action == "approval_expired" for row in rows)
+
+    with pytest.raises(ApprovalError):
+        await store.decide_approval(approval.id, ApprovalDecision.APPROVED, actor="teacher")

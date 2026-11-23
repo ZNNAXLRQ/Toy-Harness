@@ -62,8 +62,8 @@ class AgentLoop(Protocol):
 
         ``user_content`` 为 ``None`` 时是**恢复**语义：接上会话里已存在的未完成轮
         （例如进程崩溃后重启），而不是新起一轮。恢复时应先调 ``load_open_turn``；
-        没有 open turn 时返回 ``failed``/``completed`` 语义的空结果或抛
-        ``ConflictError``（实现二选一并写进文档）。
+        **没有 open turn 时统一抛 ``ConflictError``**（HTTP 映射为 409）——不要返回
+        "空结果"，否则调用方分不清"恢复成功但无事可做"和"根本没可恢复的轮次"。
         """
         ...
 
@@ -74,5 +74,10 @@ class AgentLoop(Protocol):
         ...
 
     async def abandon_turn(self, session_id: str, *, reason: str | None = None) -> TurnOutcome:
-        """人工放弃当前轮：把会话置 ``abandoned`` 并写审计；此后不可恢复。"""
+        """人工放弃当前轮：把会话置 ``abandoned`` 并写审计；此后不可恢复。
+
+        实现必须同时调用 ``StateStore.expire_pending_approvals``：放弃之后那些待审批
+        条目已经没有任何执行机会，留在 pending 会让 UI 显示幽灵项、让 ``decide`` 返回
+        409。被过期的审批要各写一条 ``approval_expired`` 审计。
+        """
         ...

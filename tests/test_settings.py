@@ -397,3 +397,13 @@ def test_empty_workspace_path_is_rejected(config_file):
 
     with pytest.raises(ValidationError):
         HarnessSettings()
+
+
+def test_unrelated_harness_prefixed_env_var_does_not_break_startup(monkeypatch, config_file):
+    """``HARNESS_HOME`` 这类同前缀但与配置无关的变量不该让服务起不来。"""
+    from app.core.config.settings import load_settings
+
+    config_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HARNESS_HOME", "/opt/tool")
+
+    assert load_settings().server.port == 8080

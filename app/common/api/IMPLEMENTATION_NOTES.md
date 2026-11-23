@@ -30,13 +30,15 @@
 
 - `StateStore`：会话/消息/工具调用/观察/审批/审计/轮次投影/事务；
 - `CheckpointStore`、`SubagentRunStore`；
-- 验收：`tests/contracts` 的 56 条用例（见下）。
+- 验收：`tests/contracts` 的 59 条用例（见下）。
 
 几个**必须按字面实现**的点（审阅时会被重点看）：
 
 1. `claim_tool_call` 必须是**单条条件更新**：`UPDATE ... WHERE id=:id AND status=:from`，
    按 `rowcount == 1` 判定；**当目标状态是 `approved` 时必须同时要求 approvals 行
-   `status='approved'`**（见方法的 SQL 注释）。读-改-写会破坏并发单飞保证。
+   `status='approved'`**（见方法的 SQL 注释）。实现步骤是**两步**：① 先查一次审批行，
+   不存在/不是 approved → 抛 `ConflictError`（这是数据不一致，不是 CAS 竞争）；
+   ② 再执行单条条件 UPDATE 完成迁移。不要退回读-改-写。
 2. `record_approval_request` 必须**同事务**完成：插 `approvals` 行 + 把调用置
    `awaiting_approval`；按 `call_id` 唯一（重复调用返回已有记录）；校验会话一致、
    `tool_name/arguments` 与 tool_call 行一致、调用为 `pending`、会话非终态。
@@ -48,16 +50,19 @@
    + `role="tool"` 消息 + 终态；会话已 `failed/abandoned` 时抛 `ConflictError`。
 6. `load_open_turn` 是**恢复入口**（会写库、判 UNKNOWN 幂等）；`peek_open_turn` 是只读投影
    （在飞调用放 `notes["in_flight"]`）。`TurnState.open_call_ids` 必须填，loop 靠它恢复派发。
-7. `record_audit` / `query_audits` 是审计的唯一写入/读取通道；`decide_approval` 的审计行
-   必须能被 `query_audits` 查到（这是契约测试的验收点）。
+7. `record_audit` / `query_audits` 是审计的唯一写入/读取通道；`query_audits` 返回
+   **最新的** `limit` 条（按 `created_at` 升序，`limit>=1`，否则 `StateError`）；
+   `decide_approval` 的审计行必须能被 `query_audits` 查到（契约测试的验收点）。
 8. `latest_message_seq` 供检查点打点（回滚补偿集合按它计算）。
-9. 终态不可迁出：`failed/abandoned` 会话上拒绝 update/append/record/claim/approval 写入。
+9. `expire_pending_approvals`：放弃一轮时把该会话 pending 审批置 denied 并写
+   `approval_expired` 审计；`list_pending_approvals` 不返回终态会话的遗留审批。
+10. 终态不可迁出：`failed/abandoned` 会话上拒绝 update/append/record/claim/approval 写入。
 
 验收（改一处即可）：
 
 ```text
 tests/contracts/conftest.py 里 _sqlite_store()：把 skip 换成你的实现构造
-uv run pytest tests/contracts -q     # 56 条 memory + sqlite 全绿
+uv run pytest tests/contracts -q     # 59 条 memory + sqlite 全绿
 ```
 
 > 注意：现在 skip 让 CI 常绿。**交付当天必须改 conftest**，否则等于没验收。
@@ -71,8 +76,10 @@ uv run pytest tests/contracts -q     # 56 条 memory + sqlite 全绿
 - `ToolRegistry`：只执行不审批；`register` 同名必须抛 `ToolError`。
 - `ApprovalService`：只做策略 + 四个委托方法（`record/decide/pending/find_for_call`
   全部委托 `StateStore`）。**不要自己开事务或连库**。
-- `AuditService`：`log` = 序列化 + `redact` + 委托 `StateStore.record_audit`；
-  `query` = 委托 `query_audits`。**审批决策的审计由 store 同事务写，不要重复记录。**
+- `AuditService`：`log` = **先对 Mapping 的值脱敏（`redact_values`）再 JSON 序列化**，
+  然后委托 `StateStore.record_audit`；顺序反了会漏掉带引号/反斜杠的密钥。
+  `query` 委托 `query_audits`。**审批决策的审计由 store 同事务写，不要重复记录。**
+  参考实现见 `tests/fakes/memory_audit_service.py`（B 的实现照它写即可）。
 - 回滚：`CheckpointStore` 由 C 实现。补偿集合按**消息序号**算（不是 created_at）：
   `messages` 中 `seq > checkpoint.seq` 且 `role='tool'` 的 `tool_call_id`，再过滤
   `reversible` 为真，逆序执行 `Tool.rollback(get_receipt(call_id))`；
@@ -85,6 +92,10 @@ uv run pytest tests/contracts -q     # 56 条 memory + sqlite 全绿
 - 审批：`GET /api/sessions/{id}/approvals?pending=1` → `POST /api/sessions/{id}/approvals/{approval_id}`
   （decide）→ 紧接着 `AgentLoop.resume_turn(session_id)`（不传 approval_id 时由 loop 按
   call 找回已决策记录）。decide 本身不派发工具。
+  **`load_open_turn` 返回 WAITING 且 `pending_approval_id` 非空 = 已决策、待恢复执行**，
+  页面应显示「恢复中/正在执行决定」，不要显示一个已经空了的审批队列。
+- 放弃一轮（abandon）后待审批会被 `expire_pending_approvals` 置为 denied，
+  重连快照里不该再出现它们。
 - 断线重连的权威快照（不是只拉 messages）：会话状态 / messages / tool-calls /
   pending approvals。
 - **只读接口不要调用 `load_open_turn`**（它会把在飞调用判 UNKNOWN 并写库）；用

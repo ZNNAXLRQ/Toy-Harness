@@ -61,7 +61,9 @@ SQLite 实现里必须是**单条条件更新**（``UPDATE ... WHERE status = :f
   按终止处理。）
 - 本轮存在 ``awaiting_approval``：
   - 审批记录已决策（approved/denied）→ ``WAITING_APPROVAL``，同时给出
-    ``pending_call_id`` 与 ``pending_approval_id``（重启后据此恢复）；
+    ``pending_call_id`` 与 ``pending_approval_id``。**``pending_approval_id`` 非空
+    表示"已决策、待恢复执行"（可能是 approved 也可能是 denied），不是"还在等人工"**；
+    UI 应按「恢复中」渲染，而不是显示一个已经空了的审批队列。
   - 未决策 → ``WAITING_APPROVAL``，``pending_approval_id=None``。
   **同一时刻最多一条**；实现发现两条及以上必须抛 ``StateError``。
   （``awaiting_approval`` 只能由 ``record_approval_request`` 产生，所以这里的
@@ -373,6 +375,14 @@ class StateStore(Protocol):
                      SELECT 1 FROM approvals WHERE call_id = :id AND status = 'approved'))
 
         ``rowcount == 1`` 即抢到。
+
+        **实现步骤**（两者都要，缺一个会出问题）：
+
+        1. 消费审批（``to == approved``）时先查一次审批行：不存在或不是 ``approved``
+           → 直接抛 ``ConflictError``（这是数据不一致，不是 CAS 竞争，返回 False 会让
+           loop 误以为"别人抢到了"而静默放弃）；
+        2. 再执行上面那条**单条**条件 UPDATE 完成状态迁移。
+           只预查审批、状态迁移仍是单条 UPDATE，**不能**退回"先查状态再写状态"。
         """
         ...
 
@@ -442,7 +452,23 @@ class StateStore(Protocol):
     async def list_pending_approvals(
         self, session_id: str | None = None
     ) -> Sequence[ApprovalView]:
-        """未决策的审批队列，按 ``created_at`` 升序；Web 用它渲染审批列表。"""
+        """未决策的审批队列，按 ``created_at`` 升序；Web 用它渲染审批列表。
+
+        **不返回** ``failed`` / ``abandoned`` 会话里的遗留审批（见
+        ``expire_pending_approvals``）——否则重连快照里会出现一条永远处理不了的幽灵项。
+        """
+        ...
+
+    async def expire_pending_approvals(
+        self, session_id: str, *, actor: str
+    ) -> Sequence[ApprovalView]:
+        """把会话内所有 ``pending`` 审批置为 ``denied``，并各写一条审计
+        （``action='approval_expired'``）。
+
+        由 ``AgentLoop.abandon_turn`` 在放弃一轮时调用：放弃之后审批已经没有任何
+        执行机会，留在 pending 会让 UI 显示幽灵项、让 ``decide`` 返回 409。
+        已决策的审批不受影响；返回被过期的记录（可能为空）。
+        """
         ...
 
     # --- 审计（audit_logs 表） ---
@@ -464,7 +490,11 @@ class StateStore(Protocol):
     async def query_audits(
         self, *, session_id: str | None = None, limit: int = 100
     ) -> Sequence[AuditView]:
-        """按 ``created_at`` 升序返回审计；``session_id=None`` 表示全部。
+        """按 ``created_at`` 升序返回**最新的** ``limit`` 条审计（不是最早的）。
+
+        ``session_id=None`` 表示全部；``limit`` 必须 >= 1，否则抛 ``StateError``。
+        语义写死的原因是 SQL 的 ``ORDER BY created_at ASC LIMIT n`` 会返回**最早** N 条，
+        与「看最近发生了什么」的直觉相反，两种实现都不报错、测试也测不出来。
 
         这个方法是审计不变式的**验收通道**：``decide_approval`` 之后必须能查到
         ``approval_decided`` 行。

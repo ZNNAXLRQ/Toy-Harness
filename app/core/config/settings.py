@@ -352,12 +352,18 @@ def check_env_sections() -> None:
     pydantic-settings 对拼错的环境变量段名是**静默忽略**的（``HARNESS_LLMM__ACTIVE``
     不会报错，只会让人以为切了厂商其实没有）。YAML 侧靠 ``extra="forbid"`` 挡住了，
     环境变量侧只能自己扫一遍。
+
+    只检查带 ``__`` 的嵌套键：配置字段全部是 ``HARNESS_<section>__<field>`` 形式，
+    而 ``HARNESS_HOME`` 这类同前缀的无关变量不该让服务起不来。
     """
     unknown = {}
     for key in os.environ:
         if not key.startswith("HARNESS_"):
             continue
-        section = key[len("HARNESS_") :].split("__", 1)[0].lower()
+        rest = key[len("HARNESS_") :]
+        if "__" not in rest:
+            continue
+        section = rest.split("__", 1)[0].lower()
         if section and section not in KNOWN_SECTIONS:
             unknown[key] = section
     if unknown:

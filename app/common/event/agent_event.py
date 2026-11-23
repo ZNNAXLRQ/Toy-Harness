@@ -25,7 +25,7 @@ from app.common.event.event_type import (
     REQUIRED_PAYLOAD_FIELDS,
     EventType,
 )
-from app.common.security import redact_value
+from app.common.security import redact_values
 
 
 def _now_ms() -> int:
@@ -42,9 +42,8 @@ class AgentEvent:
 
     def __post_init__(self) -> None:
         self.validate_payload()
-        # 先校验后脱敏、只脱敏值：键是契约的一部分，不能被动过。
-        redacted = {key: redact_value(value) for key, value in self.payload.items()}
-        object.__setattr__(self, "payload", redacted)
+        # 先校验后脱敏、且只脱敏值（含嵌套）：键是契约的一部分，不能被动过。
+        object.__setattr__(self, "payload", redact_values(dict(self.payload)))
 
     def validate_payload(self) -> None:
         event_type = EventType(self.type)
