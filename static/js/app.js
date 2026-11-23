@@ -1,4 +1,5 @@
 import { selectedSession, service } from './service.js';
+import { mountSidebar } from './sidebar.js';
 import { button, code, el, kv, views } from './views.js';
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +20,7 @@ let loadVersion = 0;
 let refreshTimer;
 let busy = false;
 let returnFocus;
+let sidebar;
 const sessionPages = new Set(['approvals', 'checkpoints', 'subagents']);
 const urlSession = () => new URLSearchParams(location.search).get('session');
 function sessionLink(page, id) {
@@ -43,7 +45,7 @@ $('skip').addEventListener('click', (event) => { event.preventDefault(); $('main
 window.addEventListener('pagehide', (event) => {
   if (event.persisted) {
     page.hidden = true;
-    $('session-history').replaceChildren();
+    sidebar?.querySelector('#session-history').replaceChildren();
     $('loading').hidden = false;
   }
 });
@@ -149,7 +151,6 @@ async function refresh(options = {}) {
     const snapshot = snapshots.find((s) => s.session.id === id);
     if (version !== loadVersion) return;
     sessionRows = rows;
-    $('workspace-name').textContent = workspace.title;
     renderNavigation(sessionRows);
     const before = capturePage();
     const ui = {
@@ -281,6 +282,7 @@ async function start() {
   error();
   $('retry').hidden = true;
   try {
+    sidebar ??= await mountSidebar($('sidebar-slot'));
     const [workspace] = await service.listWorkspaces();
     sessionRows = workspace.sessions;
     const requested = urlSession();
