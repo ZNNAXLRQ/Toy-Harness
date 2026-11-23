@@ -44,7 +44,12 @@ class ModelResponse:
     reasoning_content: str | None = None
 
     def to_message(self) -> dict[str, Any]:
-        """转成 OpenAI 兼容的历史消息形状，便于追加回会话。"""
+        """转成 OpenAI 兼容的历史消息形状。
+
+        **仅用于进程内拼装请求**。落库请走 ``StateStore.record_assistant_turn``：
+        ``reasoning_content`` 不进数据库（schema 无列），恢复后的历史只有可见
+        content。若把本方法的结果当作「可恢复的历史真相」，重启后两者就会不一致。
+        """
         message: dict[str, Any] = {"role": "assistant", "content": self.content}
         if self.tool_calls:
             message["tool_calls"] = [

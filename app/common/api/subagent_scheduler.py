@@ -39,9 +39,45 @@ class SubagentResult:
     detail: Mapping[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class SubagentRunRecord:
+    """``subagent_runs`` 表的一行（C 的 schema）。"""
+
+    id: str
+    session_id: str
+    parent_task_id: str | None
+    status: str
+    context_json: str | None
+    result_json: str | None
+    created_at: int
+
+
+class SubagentRunStore(Protocol):
+    """子代理运行的持久化端口（C 实现，A 的 ``SubagentScheduler`` 消费）。
+
+    没有它，调度器只能把运行状态留在内存里：重启后 UI 看不到「有个子代理曾经在跑」，
+    也无法判断它是完成、失败还是未知（对应 ``subagent_runs`` 表的三列）。
+    """
+
+    async def save_run(self, record: SubagentRunRecord) -> SubagentRunRecord: ...
+
+    async def update_run(
+        self, run_id: str, *, status: str, result_json: str | None
+    ) -> SubagentRunRecord: ...
+
+    async def load_run(self, run_id: str) -> SubagentRunRecord | None: ...
+
+    async def list_runs(self, session_id: str) -> Sequence[SubagentRunRecord]: ...
+
+
 class SubagentScheduler(Protocol):
     async def spawn(self, task: SubagentTask) -> SubagentResult:
-        """执行一个子任务并等它结束；超并发/深度限制抛 ``SubagentError``。"""
+        """执行一个子任务并等它结束；超并发/深度限制抛 ``SubagentError``。
+
+        实现需要：``LLMProvider``、只读的 ``ToolRegistry`` 视图、``ApprovalService``
+        （仍需人工批准敏感操作）以及 ``SubagentRunStore``（先落运行记录再执行，
+        结束后更新状态；崩溃时把它留在 unknowns 里由人工处理）。
+        """
         ...
 
     async def running(self, session_id: str) -> Sequence[SubagentTask]:

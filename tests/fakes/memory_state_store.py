@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from app.common.api.llm_provider import ModelResponse
 from app.common.api.state_store import (
+    OPEN_TOOL_STATUSES,
     TERMINAL_SESSION_STATUSES,
     TOOL_TRANSITIONS,
     AssistantTurn,
@@ -28,16 +29,8 @@ from app.common.api.state_store import (
     TurnStatus,
 )
 from app.common.api.tool import ToolResult
-from app.common.exception import NotFoundError, StateError
+from app.common.exception import ConflictError, NotFoundError, StateError
 
-_OPEN_TOOL_STATUSES = frozenset(
-    {
-        ToolCallStatus.PENDING,
-        ToolCallStatus.AWAITING_APPROVAL,
-        ToolCallStatus.APPROVED,
-        ToolCallStatus.DISPATCHED,
-    }
-)
 _REOPENING_ROLES = frozenset({MessageRole.USER, MessageRole.TOOL})
 
 
@@ -136,8 +129,15 @@ class MemoryStateStore:
         if session is None:
             raise NotFoundError(f"session {session_id} not found")
         for key, value in fields.items():
+            if key == "id":
+                raise StateError("session id is immutable")
             if not hasattr(session, key):
                 raise StateError(f"unknown session field: {key}")
+            if key == "status":
+                try:
+                    value = SessionStatus(value).value
+                except ValueError as error:
+                    raise StateError(f"unknown session status: {value!r}") from error
             setattr(session, key, value)
         session.updated_at = _now()
         return session
@@ -217,6 +217,10 @@ class MemoryStateStore:
         row = self._calls.get(call_id)
         if row is None:
             raise NotFoundError(f"tool call {call_id} not found")
+        if status == ToolCallStatus.DISPATCHED:
+            raise StateError(
+                f"dispatch of {call_id} must go through claim_tool_call, not set_tool_status"
+            )
         current = ToolCallStatus(row.status)
         if status not in TOOL_TRANSITIONS[current]:
             raise StateError(f"illegal transition {current} -> {status} for {call_id}")
@@ -244,6 +248,13 @@ class MemoryStateStore:
         row = self._calls.get(call_id)
         if row is None:
             raise NotFoundError(f"tool call {call_id} not found")
+        session = self._sessions.get(row.session_id)
+        if session is not None and session.status in {
+            status.value for status in TERMINAL_SESSION_STATUSES
+        }:
+            raise ConflictError(
+                f"session {row.session_id} is {session.status}; late tool result for {call_id} refused"
+            )
         target = {
             "success": ToolCallStatus.COMPLETED,
             "error": ToolCallStatus.FAILED,
@@ -283,7 +294,7 @@ class MemoryStateStore:
         calls = [c for c in self._calls.values() if c.session_id == session_id]
         iteration = _iteration(messages)
 
-        open_calls = [c for c in calls if c.status in {s.value for s in _OPEN_TOOL_STATUSES}]
+        open_calls = [c for c in calls if c.status in {s.value for s in OPEN_TOOL_STATUSES}]
         unknown: list[str] = []
         for call in open_calls:
             if (
@@ -303,8 +314,26 @@ class MemoryStateStore:
                 notes={"unknown_calls": unknown},
             )
 
-        still_open = [c for c in open_calls if c.status in {s.value for s in _OPEN_TOOL_STATUSES}]
+        still_open = [c for c in open_calls if c.status in {s.value for s in OPEN_TOOL_STATUSES}]
         awaiting = [c for c in still_open if c.status == ToolCallStatus.AWAITING_APPROVAL.value]
+        if len(awaiting) > 1:
+            raise StateError(
+                "more than one call is awaiting approval in a single turn: "
+                + ", ".join(call.id for call in awaiting)
+            )
+        # 拒绝即终止：本轮已出现过 denied 调用时，不能因为尾部是工具消息就把这一轮
+        # 重新打开，否则模型可以绕开拒绝继续行动。
+        last_user_seq = max(
+            (m.seq for m in messages if m.role == MessageRole.USER), default=0
+        )
+        seq_by_message = {m.id: m.seq for m in messages}
+        current_turn_calls = [
+            c
+            for c in calls
+            if c.message_id and seq_by_message.get(c.message_id, 0) > last_user_seq
+        ]
+        if any(c.status == ToolCallStatus.DENIED.value for c in current_turn_calls):
+            return None
         if awaiting:
             return TurnState(
                 session_id=session_id,

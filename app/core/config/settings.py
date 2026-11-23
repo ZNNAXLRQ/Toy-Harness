@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -49,7 +49,7 @@ KNOWN_VENDOR_VARS = frozenset(ADAPTER_ENV_KEYS.values())
 
 
 class ServerSettings(BaseModel):
-    port: int = 8080
+    port: int = Field(default=8080, ge=1, le=65535)
 
 
 class DatabaseSettings(BaseModel):
@@ -57,7 +57,13 @@ class DatabaseSettings(BaseModel):
 
 
 class ProviderProfile(BaseModel):
-    """一条完整的 provider 配置。预设与自定义是同一个形状，只差填不填 optional 字段。"""
+    """一条完整的 provider 配置。预设与自定义是同一个形状，只差填不填 optional 字段。
+
+    ``extra="forbid"``：字段名拼错（``api_keyy``）必须立刻报错，而不是被静默忽略、
+    然后在启动时抛出一句莫名其妙的「没有可用密钥」。
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     adapter: AdapterName = "deepseek"
     """协议形状，决定用哪个适配器、以及缺省域名取哪家的。"""
@@ -65,7 +71,9 @@ class ProviderProfile(BaseModel):
     api_key: str | None = Field(default=None, repr=False)
     """字面值、``${VAR}`` 占位符，或留空以使用适配器对应的厂商环境变量。
 
-    ``repr=False``：日志里 ``print(settings)`` 不该把密钥打出来。
+    ``repr=False``：日志里 ``print(settings)`` 不该把密钥打出来。注意
+    ``model_dump()`` / ``model_dump_json()`` **仍会包含它**，不要把整个配置对象
+    直接写日志或返回给前端。
     """
 
     base_url: str | None = None
@@ -74,8 +82,16 @@ class ProviderProfile(BaseModel):
     model: str | None = None
     """留空由适配器选择默认模型，配置文件不硬编码模型版本。"""
 
-    timeout_seconds: float = 60.0
-    max_retries: int = 0
+    timeout_seconds: float = Field(default=60.0, gt=0)
+    max_retries: int = Field(default=0, ge=0)
+
+    @field_validator("api_key", "base_url", "model", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: object) -> object:
+        """``api_key: ""`` 这类空字符串按「没填」处理，避免把空串当成字面值发出去。"""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 def _default_profiles() -> dict[str, ProviderProfile]:
@@ -149,6 +165,10 @@ class HarnessSettings(BaseSettings):
 
         失败一律抛 ``ConfigError``（不是 pydantic 的 ValidationError），因为这是
         部署配置问题，Web 层要能映射成一个可读的错误而不是 500 堆栈。
+
+        **建议容器延迟调用它**：没有配置密钥时服务仍应能启动并浏览历史会话，
+        只有第一次真正要调模型时才需要 provider。启动即解析会让「只想看看 UI」
+        也被密钥卡住。
         """
         name = self.llm.active
         profile = self.llm.providers.get(name)
@@ -177,6 +197,15 @@ class HarnessSettings(BaseSettings):
             max_retries=profile.max_retries,
         )
 
+    def database_path(self) -> Path:
+        """SQLite 文件路径。
+
+        相对路径按**项目根目录**解析，而不是进程 cwd——否则换个目录启动服务就会
+        另起一个空的 ``data/harness.db``，看起来像「数据丢了」。
+        """
+        path = Path(self.database.path).expanduser()
+        return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
 
 def _resolve_api_key(profile: ProviderProfile, name: str) -> str | None:
     """解析成真实密钥。
@@ -184,12 +213,21 @@ def _resolve_api_key(profile: ProviderProfile, name: str) -> str | None:
     占位符允许指向任意变量（自定义网关用 ``${GW_KEY}`` 是合法的），但如果它指的
     是**另一家厂商的官方变量**（``${OPENAI_API_KEY}`` 却挂在 deepseek 上），那基本
     是从示例配置里抄错了行，直接报错；配置串味在 profile 模型里本就不可能发生。
+    比较时统一大写：``${openai_api_key}`` 这种小写写法同样是抄错行，不该悄悄落到
+    「没有密钥」。
     """
     raw = (profile.api_key or "").strip()
     expected = ADAPTER_ENV_KEYS[profile.adapter]
     if raw.startswith("${") and raw.endswith("}"):
         variable = raw[2:-1].strip()
-        if variable in KNOWN_VENDOR_VARS and variable != expected:
+        if not variable:
+            raise ConfigError(
+                f"profile {name!r} 的 api_key 是空占位符 ``${{}}``；"
+                f"应写变量名（如 ${{{expected}}}）或留空",
+                detail={"provider": name, "adapter": profile.adapter},
+            )
+        canonical = variable.upper()
+        if canonical in KNOWN_VENDOR_VARS and canonical != expected:
             raise ConfigError(
                 f"profile {name!r}（adapter={profile.adapter}）的 api_key 指向 {variable}，"
                 f"这属于另一家厂商；应使用 {expected}（或自定义变量名）",

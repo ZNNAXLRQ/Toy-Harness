@@ -24,7 +24,7 @@ from app.common.api.state_store import (
     TurnStatus,
 )
 from app.common.api.tool import ToolResult
-from app.common.exception import NotFoundError, StateError
+from app.common.exception import ConflictError, NotFoundError, StateError
 from tests.fakes.memory_state_store import MemoryStateStore
 
 
@@ -339,3 +339,77 @@ async def test_transaction_rolls_back_completed_writes(store):
 async def test_missing_session_raises_not_found(store):
     with pytest.raises(NotFoundError):
         await store.append_message("nope", MessageRole.USER, "x")
+
+
+# --- 全链路自查补的用例 ---
+
+
+async def test_set_tool_status_cannot_dispatch(store):
+    """派发必须走 claim；set_tool_status 直接写 dispatched 会绕过单飞保证。"""
+    await _turn_with_calls(store, "call-1")
+
+    with pytest.raises(StateError):
+        await store.set_tool_status("call-1", ToolCallStatus.DISPATCHED)
+
+
+async def test_late_result_after_abandoned_session_is_rejected(store):
+    """已经终止的一轮不能被迟到的工具结果「救活」。"""
+    session = await _turn_with_calls(store, "call-1")
+    await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+    )
+    await store.update_session(session.id, status=SessionStatus.ABANDONED.value)
+
+    with pytest.raises(ConflictError):
+        await store.finish_tool_call("call-1", ToolResult("success", "late"))
+
+
+async def test_update_session_rejects_id_change(store):
+    session = await store.create_session()
+
+    with pytest.raises(StateError):
+        await store.update_session(session.id, id="forged")
+
+
+async def test_update_session_rejects_unknown_status(store):
+    session = await store.create_session()
+
+    with pytest.raises(StateError):
+        await store.update_session(session.id, status="nonsense")
+
+
+async def test_two_awaiting_approvals_in_one_turn_are_rejected(store):
+    """同一时刻只允许一条待审批；出现两条说明上一轮挂起没被消费。"""
+    session = await _turn_with_calls(store, "call-1", "call-2")
+    await store.set_tool_status("call-1", ToolCallStatus.AWAITING_APPROVAL)
+    await store.set_tool_status("call-2", ToolCallStatus.AWAITING_APPROVAL)
+
+    with pytest.raises(StateError):
+        await store.load_open_turn(session.id)
+
+
+async def test_denial_terminates_the_turn(store):
+    """拒绝即终止：尾部是工具消息也不能把这一轮重新打开。"""
+    session = await _turn_with_calls(store, "call-1")
+    await store.set_tool_status("call-1", ToolCallStatus.AWAITING_APPROVAL)
+    await store.finish_tool_call("call-1", ToolResult("denied", "refused"))
+
+    assert await store.load_open_turn(session.id) is None
+
+    # 用户重新发消息属于新一轮。
+    await store.append_message(session.id, MessageRole.USER, "换个方式")
+    state = await store.load_open_turn(session.id)
+    assert state is not None and state.status == TurnStatus.OPEN
+
+
+async def test_iteration_counts_every_model_call_in_the_turn(store):
+    session = await _turn_with_calls(store, "call-1")
+    await store.claim_tool_call(
+        "call-1", from_status=ToolCallStatus.PENDING, to_status=ToolCallStatus.DISPATCHED
+    )
+    await store.finish_tool_call("call-1", ToolResult("success", "ok"))
+    await store.record_assistant_turn(session.id, _response("call-2"))
+
+    state = await store.load_open_turn(session.id)
+
+    assert state is not None and state.iteration == 2

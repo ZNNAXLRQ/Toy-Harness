@@ -32,6 +32,21 @@ class RollbackResult:
         return not self.failed
 
 
+class CheckpointStore(Protocol):
+    """检查点持久化端口（C 实现，B 的 ``RollbackService`` 消费）。
+
+    sample 把它放在 ``app/state/persistence/checkpoint_repository.py``；按依赖规则
+    ``tools/rollback`` 不能直接 import 实现，因此需要这层端口。没有它，
+    ``RollbackService`` 就只能自己在内存里记检查点——重启即失效。
+    """
+
+    async def save_checkpoint(self, checkpoint: Checkpoint) -> Checkpoint: ...
+
+    async def list_checkpoints(self, session_id: str) -> Sequence[Checkpoint]: ...
+
+    async def load_checkpoint(self, checkpoint_id: str) -> Checkpoint | None: ...
+
+
 class RollbackService(Protocol):
     async def create_checkpoint(
         self, session_id: str, description: str | None = None

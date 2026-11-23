@@ -7,6 +7,9 @@
 - 落库实体（``Message``、``ToolCallRecord``、``Observation``、``Session``）属于
   ``app/common/model``（C 维护），本包用结构化 Protocol 声明所需形状，不重复定义。
 
+持久化端口按聚合拆开，避免一个巨大的 StateStore：会话/轮次/工具调用归 ``StateStore``，
+检查点归 ``CheckpointStore``，子代理运行归 ``SubagentRunStore``。三个都由 C 实现。
+
 过渡说明：``runtime.py`` 是 nano-codex 原型的注入点，仅在 PR2 剪切前供旧代码使用，
    新代码一律从这里导入。
 """
@@ -17,8 +20,15 @@ from app.common.api.approval_service import ApprovalDecision, ApprovalRequest, A
 from app.common.api.audit_service import AuditEntry, AuditService
 from app.common.api.context_manager import ContextManager, PreparedContext
 from app.common.api.llm_provider import CompletionRequest, LLMProvider, ModelResponse, ModelToolCall
-from app.common.api.rollback_service import Checkpoint, RollbackResult, RollbackService
+from app.common.api.rollback_service import (
+    Checkpoint,
+    CheckpointStore,
+    RollbackResult,
+    RollbackService,
+)
 from app.common.api.state_store import (
+    OPEN_TOOL_STATUSES,
+    TOOL_TRANSITIONS,
     AssistantTurn,
     MessageRole,
     MessageView,
@@ -30,7 +40,13 @@ from app.common.api.state_store import (
     TurnState,
     TurnStatus,
 )
-from app.common.api.subagent_scheduler import SubagentResult, SubagentScheduler, SubagentTask
+from app.common.api.subagent_scheduler import (
+    SubagentResult,
+    SubagentRunRecord,
+    SubagentRunStore,
+    SubagentScheduler,
+    SubagentTask,
+)
 from app.common.api.tool import Tool, ToolResult, ToolSpec
 from app.common.api.tool_registry import ToolRegistry
 
@@ -51,8 +67,11 @@ __all__ = [
     "ModelResponse",
     "ModelToolCall",
     "Checkpoint",
+    "CheckpointStore",
     "RollbackResult",
     "RollbackService",
+    "OPEN_TOOL_STATUSES",
+    "TOOL_TRANSITIONS",
     "AssistantTurn",
     "MessageRole",
     "MessageView",
@@ -64,6 +83,8 @@ __all__ = [
     "TurnState",
     "TurnStatus",
     "SubagentResult",
+    "SubagentRunRecord",
+    "SubagentRunStore",
     "SubagentScheduler",
     "SubagentTask",
     "Tool",

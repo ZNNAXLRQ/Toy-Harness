@@ -23,8 +23,18 @@
        └──────────────┴─→ denied（审批拒绝，工具从未派发）
 
 **只有通过 ``claim_tool_call`` 条件迁移（CAS）的那一方可以执行工具**：并发恢复时
-第二个调用者拿到 ``False``，因此不存在重复派发。``set_tool_status`` 直接拒绝
-终态迁出。
+第二个调用者拿到 ``False``，因此不存在重复派发。``set_tool_status`` **不允许**把状态
+写到 ``dispatched``——绕过 CAS 直接派发正是重复执行的入口。``claim_tool_call`` 在
+SQLite 实现里必须是**单条条件更新**（``UPDATE ... WHERE status = :from``，按
+``rowcount`` 判定），不得读-改-写。
+
+``approved`` 不等于可执行：恢复流程用两次 CAS 完成一次性派发——
+``awaiting_approval → approved``（抢到的人消费审批）、``approved → dispatched``
+（抢到的人执行）。第二次失败就说明别人已经派发过，必须放弃。
+
+**审批拒绝即终止本轮。** ``denied`` 是安全边界：模型不能靠「换个工具再来」绕开拒绝。
+因此一轮里只要出现 ``denied`` 调用，恢复推导就认为该轮没有 open turn（见下），
+不需要依赖状态字段恰好被写对。
 
 ## 一轮的边界与恢复
 
@@ -33,7 +43,11 @@
 - ``sessions.status`` 为 ``failed`` / ``abandoned`` → 没有 open turn（``None``）。
   只有这两个是「硬终态」；``idle`` / ``completed`` 不阻断推导——一轮完成后用户再发
   消息就是新一轮，靠状态字段判断反而会把新轮挡掉。
-- 存在 ``awaiting_approval`` → ``WAITING_APPROVAL``；
+- 存在 ``awaiting_approval`` → ``WAITING_APPROVAL``。**同一时刻最多一条**；实现发现
+  两条及以上时必须抛 ``StateError``，不允许静默取第一条——那意味着上一轮的挂起没被
+  正确消费。
+- 本轮（最后一条 user 消息之后）出现过 ``denied`` 调用 → 没有 open turn（``None``）；
+  拒绝是安全边界，不能因为「尾部是工具消息」就把这一轮重新打开。
 - 存在 ``dispatched`` 而无观察结果 → 判 ``unknown``，落会话 ``failed``，返回带
   ``notes["unknown_calls"]`` 的 ``FAILED``（**唯一一处恢复写**，幂等，判过即不可恢复）；
 - 其余情况看最后一条消息：``user`` / ``tool`` → ``OPEN``（模型还没回复，或工具结果
@@ -128,7 +142,7 @@ TERMINAL_SESSION_STATUSES = frozenset({SessionStatus.FAILED, SessionStatus.ABAND
 """只有这两个状态会阻止恢复。``idle`` / ``completed`` 仍按行推导——完成后用户再发
 一条消息就是新一轮，不能因为状态字段是 completed 就把新轮挡掉。"""
 
-_OPEN_TOOL_STATUSES = frozenset(
+OPEN_TOOL_STATUSES = frozenset(
     {
         ToolCallStatus.PENDING,
         ToolCallStatus.AWAITING_APPROVAL,
@@ -136,7 +150,7 @@ _OPEN_TOOL_STATUSES = frozenset(
         ToolCallStatus.DISPATCHED,
     }
 )
-"""可继续推进的状态；实现用它区分「还没结束」和「已终态」。"""
+"""还没结束的状态；实现用它在「未终态」和「已终态」之间区分。"""
 
 
 class SessionView(Protocol):
@@ -201,7 +215,13 @@ class StateStore(Protocol):
     async def load_session(self, session_id: str) -> SessionView | None: ...
 
     async def update_session(self, session_id: str, **fields: Any) -> SessionView:
-        """更新会话字段（含 ``status``）。改 ``status`` 是 loop 的职责。"""
+        """更新会话字段（含 ``status``）。改 ``status`` 是 loop 的职责。
+
+        - ``id`` 不可修改（实现应抛 ``StateError``）：它同时是主键与索引键，
+          改了会让会话查不到自己。
+        - ``status`` 必须是 ``SessionStatus`` 的取值，否则 ``StateError``；
+          写进去的垃圾字符串会让恢复逻辑的终态判断失效。
+        """
         ...
 
     async def list_sessions(self, limit: int = 50) -> Sequence[SessionView]: ...
@@ -240,7 +260,11 @@ class StateStore(Protocol):
         *,
         error: str | None = None,
     ) -> ToolCallView:
-        """按 ``TOOL_TRANSITIONS`` 迁移；终态迁出、非法迁移抛 ``StateError``。"""
+        """按 ``TOOL_TRANSITIONS`` 迁移；终态迁出、非法迁移抛 ``StateError``。
+
+        **不允许**迁移到 ``dispatched``（抛 ``StateError``）：派发必须走
+        ``claim_tool_call``，否则就绕过了「只能有一方执行」的保证。
+        """
         ...
 
     async def claim_tool_call(
@@ -254,6 +278,12 @@ class StateStore(Protocol):
 
         返回 ``True`` 的那一方是**唯一**允许执行工具的人；并发恢复的其余调用者拿到
         ``False``，从而不会重复派发。只允许一次迁移，不做重试。
+
+        SQLite 实现必须用单条条件更新判定，不得先查后写：
+
+            UPDATE tool_calls SET status=:to WHERE id=:id AND status=:from
+
+        ``rowcount == 1`` 即抢到。
         """
         ...
 
@@ -265,6 +295,9 @@ class StateStore(Protocol):
         转入（工具从未被派发）；``dispatched`` 不能改判为 ``denied``。
         observation 的持久化内容是 ``{"status", "result", "receipt"}`` 的 JSON，
         ``receipt`` 由 ``get_receipt`` 读回。
+
+        会话已处于 ``failed`` / ``abandoned`` 时必须抛 ``ConflictError``：迟到的
+        工具结果不能把已经终止的一轮「救活」，那会制造出与最终状态矛盾的证据。
         """
         ...
 

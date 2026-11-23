@@ -1,10 +1,11 @@
 """配置读取的契约：空文件可用、yaml 是基线、环境变量覆盖、provider 是成套切换的。"""
 
 import pytest
+from pydantic import ValidationError
 
 from app.common.exception import ConfigError
 from app.core.config import settings as settings_module
-from app.core.config.settings import HarnessSettings
+from app.core.config.settings import PROJECT_ROOT, HarnessSettings
 
 SAMPLE_YAML = """
 server:
@@ -208,3 +209,76 @@ def test_profile_defaults_apply_when_not_overridden(config_file):
     assert resolved.base_url is None  # 留给适配器的默认域名
     assert resolved.timeout_seconds == 60.0
     assert resolved.max_retries == 0
+
+
+# --- 全链路自查补的用例 ---
+
+
+def test_typo_in_profile_field_is_rejected(config_file):
+    """字段拼错必须报错，而不是被静默忽略成「没有密钥」。"""
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n    local:\n      adapter: openai\n      api_keyy: sk\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+def test_invalid_server_port_is_rejected(config_file):
+    config_file.write_text("server:\n  port: 99999\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+def test_non_positive_timeout_is_rejected(config_file):
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n    local:\n      api_key: k\n      timeout_seconds: 0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError):
+        HarnessSettings()
+
+
+def test_blank_api_key_is_treated_as_missing(config_file, monkeypatch):
+    """``api_key: ""`` 按没填处理，回落到厂商环境变量，不把空串当字面值发出去。"""
+    config_file.write_text(
+        'llm:\n  active: local\n  providers:\n    local:\n      adapter: openai\n      api_key: ""\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+
+    assert HarnessSettings().resolve_provider().api_key == "sk-env"
+
+
+def test_lowercase_placeholder_naming_another_vendor_is_rejected(config_file, monkeypatch):
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n    local:\n      adapter: deepseek\n"
+        "      api_key: ${openai_api_key}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("openai_api_key", "sk-openai")
+
+    with pytest.raises(ConfigError):
+        HarnessSettings().resolve_provider()
+
+
+def test_empty_placeholder_is_rejected(config_file):
+    config_file.write_text(
+        "llm:\n  active: local\n  providers:\n    local:\n      api_key: ${}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError):
+        HarnessSettings().resolve_provider()
+
+
+def test_relative_database_path_resolves_against_project_root(config_file):
+    """相对路径不能依赖进程 cwd，否则换个目录启动就像「数据丢了」。"""
+    config_file.write_text("database:\n  path: ./data/harness.db\n", encoding="utf-8")
+
+    settings = HarnessSettings()
+
+    assert settings.database_path() == (PROJECT_ROOT / "data/harness.db").resolve()
