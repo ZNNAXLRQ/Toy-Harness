@@ -1,7 +1,6 @@
 import { createDemoService } from './demo-service.js';
 
-// Composition root. A future REST/SSE adapter implements the same async queries,
-// commands and subscribe(sessionId, listener) => unsubscribe interface.
+// Static demo only. The Web entry point does not load or initialize this store.
 const key = (name) => `toy-harness.demo.v1.${name}`;
 function storageFailed() {
   document.getElementById('storage-warning').hidden = false;

@@ -30,7 +30,7 @@ const pairs = (rows) => rows.flatMap(([key, value]) => [el('dt', {}, key), el('d
 export const kv = (rows) => el('dl', { class: 'kv' }, pairs(rows));
 const fill = (id, ...nodes) => $(id).replaceChildren(...nodes.filter(Boolean));
 const list = (id, rows, message) => fill(id, ...(rows.length ? rows : [empty(message)]));
-const table = (id, rows, message) => {
+export const table = (id, rows, message) => {
   const columns = [...$(id).closest('table').tHead.rows[0].cells].map((cell) => cell.textContent);
   fill(id, ...(rows.length ? rows.map((row) => el('tr', {}, row.map((value, i) =>
     el(i === 0 ? 'th' : 'td', { 'data-label': columns[i], scope: i === 0 ? 'row' : null }, value)))) :
