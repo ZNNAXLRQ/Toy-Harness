@@ -3,15 +3,18 @@
   top: 20px;
   align-self: start;
   min-inline-size: 0;
-  min-height: calc(100vh - 40px);
-  min-height: calc(100dvh - 40px);
+  block-size: calc(100vh - 40px);
+  block-size: calc(100dvh - 40px);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+  scroll-padding-block: 5px;
   padding: 15px 12px;
   border: 1px solid var(--line);
   border-radius: 20px;
   background: var(--surface);
 }
+.sidebar > :not(.history-nav) { flex: none; }
 .brand, .sidebar-foot { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand { padding: 0 4px; font-size: 18px; white-space: nowrap; }
 .logo { display: inline-grid; flex: none; place-items: center; font-weight: 750; width: 36px; height: 36px; border-radius: 12px; background: var(--primary); color: #fff; font-size: 13px; }
@@ -23,8 +26,9 @@
 .sidebar nav a[aria-current] { font-weight: 750; }
 .nav-icon { width: 15px; flex: none; text-align: center; }
 .history-nav {
-  flex: none;
-  block-size: 12rem;
+  flex: 1 1 0;
+  /* Keep roughly one row reachable; if space runs out, the sidebar can also scroll. */
+  min-block-size: 3rem;
   grid-template-columns: minmax(0, 1fr);
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -40,10 +44,15 @@
   .brand { font-size: 15px; }
 }
 @media (max-width: 650px) {
-  .sidebar { position: static; min-height: auto; margin-bottom: 12px; padding: 10px; }
+  .sidebar {
+    position: static;
+    block-size: calc(100vh - 20px);
+    block-size: calc(100dvh - 20px);
+    margin-bottom: 12px;
+    padding: 10px;
+  }
   .sidebar-foot { margin-top: 8px; }
   .sidebar .new-link { align-self: start; width: auto; margin-top: 8px; }
-  .history-nav { block-size: 9rem; }
   .task-nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .sidebar nav a { padding: 5px; gap: 3px; min-height: 34px; font-size: 12px; overflow-wrap: anywhere; }
 }

@@ -335,51 +335,93 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
   const layout = client(await tab());
   const measure = () => layout.evaluate(`{
     const history = document.querySelector('#session-history');
+    const sidebar = history.parentElement;
+    const bounds = sidebar.getBoundingClientRect();
     ({ count: history.children.length, height: history.getBoundingClientRect().height,
       scrollHeight: history.scrollHeight, clientHeight: history.clientHeight,
-      taskTop: document.querySelector('.task-nav').getBoundingClientRect().top + scrollY,
-      overflowY: getComputedStyle(history).overflowY,
+      taskTop: sidebar.querySelector('.task-nav').getBoundingClientRect().top - bounds.top,
+      settingsBottom: sidebar.querySelector('.sidebar-foot').getBoundingClientRect().bottom - bounds.top,
+      sidebarHeights: [sidebar.scrollHeight, sidebar.clientHeight],
+      sidebarWidths: [sidebar.scrollWidth, sidebar.clientWidth],
       listWidths: [history.scrollWidth, history.clientWidth],
-      pageWidths: [document.documentElement.scrollWidth, innerWidth] });
+      pageWidths: [document.documentElement.scrollWidth, innerWidth],
+      separateFromMain: bounds.right <= document.querySelector('main').getBoundingClientRect().left ||
+        bounds.bottom <= document.querySelector('main').getBoundingClientRect().top });
   }`);
-  const setLayoutWidth = (width) => layout.run('Emulation.setDeviceMetricsOverride', {
-    width, height: 820, deviceScaleFactor: 1, mobile: false,
+  const viewports = [[1280, 720], [1280, 960], [320, 820], [1280, 360], [320, 240]];
+  const setLayoutViewport = (width, height) => layout.run('Emulation.setDeviceMetricsOverride', {
+    width, height, deviceScaleFactor: 1, mobile: false,
   });
-  const measureBothWidths = async () => {
-    await setLayoutWidth(1280);
-    const desktop = await measure();
-    await setLayoutWidth(320);
-    return [desktop, await measure()];
+  const measureViewports = async () => {
+    const samples = [];
+    for (const viewport of viewports) {
+      await setLayoutViewport(...viewport);
+      samples.push(await measure());
+    }
+    return samples;
   };
   await layout.open('tools');
-  const few = await measureBothWidths();
+  const few = await measureViewports();
   await layout.evaluate('sessionStorage.setItem("toy-harness.demo.v1.state", JSON.stringify({ sessions: [] }))');
   await layout.run('Page.navigate', { url: `${origin}/html/tools.html?layout=empty` });
   await until(() => layout.evaluate(`location.search === '?layout=empty' &&
     !document.querySelector('#page')?.hidden && document.querySelector('#session-history')?.children.length === 0`), 'empty workspace renders');
-  const empty = await measureBothWidths();
+  const empty = await measureViewports();
   await layout.evaluate(`import('/js/service.js').then(async ({ service }) => {
     for (let i = 0; i < 20; i++) await service.createSession('LongSessionName'.repeat(5) + i);
     location.replace('tools.html?layout=many');
   }); true`);
   await until(() => layout.evaluate(`new URLSearchParams(location.search).get('layout') === 'many' &&
     document.querySelector('#session-history')?.children.length === 20`), 'populated workspace renders');
-  const many = await measureBothWidths();
-  for (const [width, crowded] of many.entries()) {
-    assert.equal(few[width].count, 3);
-    assert.equal(empty[width].count, 0);
-    assert.equal(crowded.count, 20);
-    assert.ok(few[width].height > 0);
-    for (const sample of [few[width], empty[width], crowded]) {
-      assert.equal(sample.height, few[width].height);
-      assert.equal(sample.taskTop, few[width].taskTop);
-      assert.equal(sample.overflowY, 'auto');
-      assert.ok(sample.listWidths[0] <= sample.listWidths[1], JSON.stringify(sample));
-      assert.ok(sample.pageWidths[0] <= sample.pageWidths[1], JSON.stringify(sample));
+  const many = await measureViewports();
+  for (const [i, crowded] of many.entries()) {
+    const viewport = viewports[i].join('×');
+    const short = i >= 3;
+    assert.deepEqual([empty[i].count, few[i].count, crowded.count], [0, 3, 20], viewport);
+    assert.ok(few[i].height > 0, viewport);
+    for (const sample of [empty[i], few[i], crowded]) {
+      assert.equal(sample.height, few[i].height, viewport);
+      assert.equal(sample.taskTop, few[i].taskTop, viewport);
+      assert.equal(sample.settingsBottom, few[i].settingsBottom, viewport);
+      assert.equal(sample.sidebarHeights[0] > sample.sidebarHeights[1], short, viewport);
+      assert.ok(sample.separateFromMain, viewport);
+      for (const [scrollWidth, clientWidth] of [sample.listWidths, sample.sidebarWidths, sample.pageWidths]) {
+        assert.ok(scrollWidth <= clientWidth, `${viewport}: ${JSON.stringify(sample)}`);
+      }
     }
-    assert.ok(crowded.scrollHeight > crowded.clientHeight);
-  }
+    assert.ok(crowded.scrollHeight > crowded.clientHeight, viewport);
+    if (short) continue;
 
+    await setLayoutViewport(...viewports[i]);
+    const point = await layout.evaluate(`{
+      window.scrollTo(0, 0);
+      const history = document.querySelector('#session-history');
+      history.scrollTop = 0;
+      const { left, top, width, height } = history.getBoundingClientRect();
+      ({ x: left + width / 2, y: top + height / 2 });
+    }`);
+    await layout.run('Input.dispatchMouseEvent', { type: 'mouseWheel', ...point, deltaX: 0, deltaY: 120 });
+    await until(() => layout.evaluate('document.querySelector("#session-history").scrollTop > 0'), `history scrolls at ${viewport}`);
+    assert.deepEqual(await layout.evaluate('[scrollY, document.querySelector(".sidebar").scrollTop]'), [0, 0], viewport);
+  }
+  assert.equal(many[1].height - many[0].height, viewports[1][1] - viewports[0][1]);
+  assert.equal(many[1].taskTop - many[0].taskTop, many[1].height - many[0].height);
+  assert.equal(many[1].settingsBottom - many[0].settingsBottom, many[1].height - many[0].height);
+
+  await setLayoutViewport(...viewports.at(-1));
+  const layoutKey = async (key, windowsVirtualKeyCode) => {
+    for (const type of ['rawKeyDown', 'keyUp']) {
+      await layout.run('Input.dispatchKeyEvent', { type, key, code: key, windowsVirtualKeyCode });
+    }
+  };
+  const assertFocusedAndReachable = async (selector) => {
+    assert.equal(await layout.evaluate(`{
+      const target = document.activeElement;
+      const { x, y, width, height } = target.getBoundingClientRect();
+      target.matches(${JSON.stringify(selector)}) &&
+        target.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+    }`), true, `${selector} is focused and visible at ${viewports.at(-1).join('×')}`);
+  };
   const last = await layout.evaluate(`{
     const history = document.querySelector('#session-history');
     document.querySelector('.new-link').focus();
@@ -391,8 +433,7 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
     history.lastElementChild.getBoundingClientRect().top >= history.getBoundingClientRect().bottom;
   }`), true);
   for (let i = 0; i < 21; i++) {
-    await layout.run('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
-    await layout.run('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Tab', code: 'Tab', windowsVirtualKeyCode: 9 });
+    await layoutKey('Tab', 9);
     if (await layout.evaluate(`document.activeElement.dataset.sessionId === ${JSON.stringify(last)}`)) break;
   }
   assert.equal(await layout.evaluate(`{
@@ -400,8 +441,34 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
     document.activeElement === history.lastElementChild && history.scrollTop > 0 &&
       document.activeElement.getBoundingClientRect().top < history.getBoundingClientRect().bottom;
   }`), true);
-  await layout.run('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  await assertFocusedAndReachable('#session-history a:last-child');
+  await layoutKey('Enter', 13);
   await layout.opened(last);
+  await layout.evaluate('document.querySelector("#session-history a:last-child").focus()');
+  const taskCount = await layout.evaluate('document.querySelector(".task-nav").children.length');
+  for (let i = 1; i <= taskCount; i++) {
+    await layoutKey('Tab', 9);
+    await assertFocusedAndReachable(`.task-nav a:nth-child(${i})`);
+  }
+  assert.ok(await layout.evaluate('document.querySelector(".sidebar").scrollTop > 0'));
+  await layoutKey('Enter', 13);
+  await layout.ready('context');
+  assert.equal(await layout.selected(), last);
+
+  await layout.evaluate('document.querySelector(".task-nav a:last-child").focus()');
+  await layoutKey('Tab', 9);
+  await assertFocusedAndReachable('.sidebar-foot');
+  await layoutKey('Enter', 13);
+  await layout.ready('settings');
+  assert.equal(await layout.selected(), last);
+
+  await layout.evaluate('document.querySelector("#skip").focus()');
+  await layoutKey('Tab', 9);
+  await assertFocusedAndReachable('.new-link');
+  await layoutKey('Enter', 13);
+  await layout.ready('sessions');
+  await until(() => layout.evaluate('location.hash === "#new-session" && document.activeElement.id === "new-session"'), 'short viewport create form focused');
+  assert.equal(await layout.selected(), last);
 
   assert.deepEqual(exceptions, []);
   assert.ok(requests.length > 9);
