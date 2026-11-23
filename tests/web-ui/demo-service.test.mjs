@@ -1,8 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createDemoService } from '../../static/js/demo-service.mjs';
+import { createDemoService } from '../../static/js/demo-service.js';
 
 const pending = (snapshot) => snapshot.approvals.find((row) => row.decision == null);
+
+test('tab snapshots preserve approval boundaries, counters, and compensated calls', async () => {
+  let saved;
+  const open = () => createDemoService({ snapshot: saved && JSON.parse(saved), save: (snapshot) => { saved = JSON.stringify(snapshot); } });
+  const approvals = open();
+  const [first, second] = await approvals.listSessions();
+  const untouched = await approvals.getSession(first.id);
+  const initial = await approvals.getSession(second.id);
+  const approval = pending(initial);
+  await approvals.decide(second.id, approval.id, 'approved');
+
+  const recovery = open();
+  const decided = await recovery.getSession(second.id);
+  assert.equal(decided.approvals[0].decision, 'approved');
+  assert.equal(decided.tool_calls[0].status, 'awaiting_approval');
+  assert.equal(decided.demo.note, initial.demo.note);
+  await recovery.resume(second.id, approval.id);
+  const resumed = await recovery.getSession(second.id);
+  assert.equal(resumed.demo.note, approval.arguments.text);
+  assert.equal(new Set(resumed.messages.map(({ id }) => id)).size, resumed.messages.length);
+  assert.ok(resumed.events.at(-1).created_at > decided.events.at(-1).created_at);
+
+  const checkpoints = open();
+  const point = initial.checkpoints[0];
+  assert.deepEqual((await checkpoints.rollback(second.id, point.id)).reverted, [approval.call_id]);
+  const reloaded = open();
+  assert.deepEqual(await reloaded.getSession(first.id), untouched);
+  assert.deepEqual((await reloaded.getSession(second.id)).messages, resumed.messages);
+  assert.equal((await reloaded.getSession(second.id)).demo.note, initial.demo.note);
+  assert.deepEqual((await reloaded.rollback(second.id, point.id)).reverted, []);
+});
 
 test('fixtures are reproducible; session queries, writes, and listeners stay isolated', async () => {
   const service = createDemoService();

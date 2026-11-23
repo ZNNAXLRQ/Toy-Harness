@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>子代理 · Toy Harness</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../css/subagents.css">
+  <script type="module" src="../js/app.js"></script>
+</head>
+<body>
+  <a href="#main" class="skip" id="skip">跳至主要内容</a>
+  <aside class="sidebar">
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
+    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <nav aria-label="工作台导航">
+      <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
+      <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
+      <a href="sessions.html"><span class="nav-icon" aria-hidden="true">▤</span>会话与恢复</a>
+      <a href="checkpoints.html"><span class="nav-icon" aria-hidden="true">↶</span>检查点与回滚</a>
+      <a href="subagents.html" aria-current="page"><span class="nav-icon" aria-hidden="true">◎</span>子代理</a>
+      <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
+      <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
+      <a href="context.html"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
+    </nav>
+    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>子代理</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <div class="content">
+      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">子代理进度</h1><p>查看父会话中的运行任务、工具白名单与结果摘要。</p></header>
+      <div id="error" class="notice error" role="alert" hidden></div>
+      <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
+      <div id="status" class="sr-only" role="status"></div>
+      <p id="loading" class="empty">正在加载本地演示…</p>
+      <button type="button" id="retry" hidden>重试</button>
+      <div id="page" data-page="subagents" aria-busy="true" hidden>
+        <section class="card panel" aria-labelledby="tasks-title"><h2 id="tasks-title">当前会话的子代理任务</h2><div id="subagent-list" class="stack"></div></section>
+      </div>
+      <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
+    </div>
+  </main>
+</body>
+</html>

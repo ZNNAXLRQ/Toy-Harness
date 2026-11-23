@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>上下文与恢复 · Toy Harness</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../css/context.css">
+  <script type="module" src="../js/app.js"></script>
+</head>
+<body>
+  <a href="#main" class="skip" id="skip">跳至主要内容</a>
+  <aside class="sidebar">
+    <div class="brand"><span class="logo" aria-hidden="true">TH</span><div>Toy Harness<small>AGENT WORKBENCH</small></div></div>
+    <label class="workspace" for="session-select">当前会话<select id="session-select" disabled><option>加载中…</option></select></label>
+    <nav aria-label="工作台导航">
+      <a href="index.html"><span class="nav-icon" aria-hidden="true">◉</span>聊天</a>
+      <a href="approvals.html"><span class="nav-icon" aria-hidden="true">◇</span>审批</a>
+      <a href="sessions.html"><span class="nav-icon" aria-hidden="true">▤</span>会话与恢复</a>
+      <a href="checkpoints.html"><span class="nav-icon" aria-hidden="true">↶</span>检查点与回滚</a>
+      <a href="subagents.html"><span class="nav-icon" aria-hidden="true">◎</span>子代理</a>
+      <a href="tools.html"><span class="nav-icon" aria-hidden="true">▦</span>工具目录</a>
+      <a href="audit.html"><span class="nav-icon" aria-hidden="true">≡</span>审计日志</a>
+      <a href="context.html" aria-current="page"><span class="nav-icon" aria-hidden="true">◫</span>上下文与恢复</a>
+      <a href="settings.html"><span class="nav-icon" aria-hidden="true">⚙</span>设置</a>
+    </nav>
+    <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span> 本地演示 · 不连接后端</div>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="masthead"><span>工作空间 <span class="slash" aria-hidden="true">/</span> <strong>上下文与恢复</strong></span><span class="badge mode"><span class="dot" aria-hidden="true"></span> 示例模式</span></header>
+    <div class="content">
+      <header class="page-head"><p class="eyebrow">TOY HARNESS / WORKBENCH</p><h1 id="page-title" tabindex="-1">上下文与恢复</h1><p>检查会话级稳定前缀、消息尾部和未完成轮次。</p></header>
+      <div id="error" class="notice error" role="alert" hidden></div>
+      <p id="storage-warning" class="notice error" role="alert" hidden>无法读取或保存标签页状态；此时换页或刷新可能丢失演示进度。</p>
+      <div id="status" class="sr-only" role="status"></div>
+      <p id="loading" class="empty">正在加载本地演示…</p>
+      <button type="button" id="retry" hidden>重试</button>
+      <div id="page" data-page="context" aria-busy="true" hidden>
+        <div class="grid equal">
+          <section class="card panel" aria-labelledby="context-title">
+            <h2 id="context-title">上下文快照</h2>
+            <div class="stack">
+              <dl id="context-summary" class="kv"></dl>
+              <details><summary>稳定前缀</summary><pre id="context-prefix"></pre></details>
+              <details><summary>消息尾部</summary><pre id="context-messages"></pre></details>
+            </div>
+          </section>
+          <div class="stack">
+            <section class="card panel" aria-labelledby="agents-title">
+              <h2 id="agents-title">AGENTS.md</h2><dl id="agents-summary" class="kv"></dl>
+              <details><summary>查看文档内容</summary><pre id="agents-content"></pre></details>
+            </section>
+            <section class="card panel" aria-labelledby="recovery-title">
+              <h2 id="recovery-title">轮次恢复</h2>
+              <div class="stack">
+                <dl id="turn-summary" class="kv"></dl><div id="recovery-action"></div>
+                <div class="actions"><a href="index.html">查看会话历史</a><a href="sessions.html">返回会话列表</a></div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+      <noscript><p class="notice error">此演示需要启用 JavaScript。</p></noscript>
+    </div>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description">
+    <header class="dialog-head"><h2 id="dialog-title"></h2><button type="button" id="dialog-close" class="icon-button" aria-label="关闭弹窗" autofocus>×</button></header>
+    <p id="dialog-description"></p>
+    <div id="dialog-body"></div>
+    <p id="dialog-error" class="notice error" role="alert" hidden></p>
+    <div id="dialog-actions" class="actions dialog-actions"></div>
+  </dialog>
+</body>
+</html>
