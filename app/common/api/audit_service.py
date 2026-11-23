@@ -3,7 +3,7 @@
 审计与事件不是一回事：事件是给人看的实时流（可丢、可重建），审计是不可变的
 决定记录（审批、回滚、会话创建、子代理启停）。
 
-## 存储（本版明确）
+## 存储
 
 审计写入与查询**由 ``StateStore`` 提供**（``record_audit`` / ``query_audits``），
 ``AuditService`` 的实现只做委托。原因与审批相同：B 不该自己连数据库，也不该为了
@@ -13,11 +13,17 @@
 （``action='approval_decided'``），**``AuditService.log`` 不要重复记录这一条**，
 否则审计表会出现两条矛盾的决策记录。
 
-## 脱敏
+## 脱敏顺序（写错会泄漏密钥，务必按这个顺序）
 
-``detail`` 在交给 store 之前必须经 ``app.common.security.redact`` 处理：
-审计要长期保留，不能因为「反正是内部表」就把密钥写进去。``AuditService.log``
-接受 Mapping 时负责序列化（JSON）并脱敏。
+1. 对 ``detail`` 的**值**做 ``app.common.security.redact_values``（保留键名，含嵌套）；
+2. 再 ``json.dumps`` 序列化；
+3. 最后交给 ``StateStore.record_audit``。
+
+**不能反过来**：先序列化再脱敏时，密钥里的 ``"`` / ``\\`` / 换行会被 JSON 转义，
+原值在序列化结果里不再出现，替换就匹配不到，密钥会原样落库。
+（参考实现：``tests/fakes/memory_audit_service.py``，B 的实现照它写即可。）
+
+字符串形式的 ``detail`` 直接过一遍 ``redact`` 即可。
 """
 
 from typing import Any, Mapping, Protocol, Sequence
@@ -34,7 +40,8 @@ class AuditService(Protocol):
         session_id: str | None = None,
         detail: Mapping[str, Any] | str | None = None,
     ) -> AuditView:
-        """写一条审计（序列化 + 脱敏后委托 ``StateStore.record_audit``）。
+        """写一条审计：**先对 Mapping 的值脱敏 → JSON 序列化 → 委托
+        ``StateStore.record_audit``**（顺序见模块说明，反了会漏脱敏）。
 
         失败必须抛异常，不允许静默吞掉。
         """
@@ -43,5 +50,5 @@ class AuditService(Protocol):
     async def query(
         self, *, session_id: str | None = None, limit: int = 100
     ) -> Sequence[AuditView]:
-        """委托 ``StateStore.query_audits``。"""
+        """委托 ``StateStore.query_audits``（最新 limit 条、created_at 升序、limit>=1）。"""
         ...

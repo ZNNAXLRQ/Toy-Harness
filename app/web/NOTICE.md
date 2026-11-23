@@ -19,6 +19,8 @@
 - `WAITING_APPROVAL` + `pending_approval_id` 非空 = **已决策、待恢复执行**（可能是
   approved 或 denied），页面显示「恢复中」，不要再列审批按钮；abandon 后的待审批已被
   过期，重连快照里不应出现。
+- 会话已是 `failed/abandoned` 时，即使 tool-call 仍显示 `awaiting_approval`，也按
+  「已终止」渲染，不要当成活跃审批（`expire_pending_approvals` 只改审批不改调用状态）。
 
 ## 另外两件事
 

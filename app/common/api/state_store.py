@@ -468,6 +468,11 @@ class StateStore(Protocol):
         由 ``AgentLoop.abandon_turn`` 在放弃一轮时调用：放弃之后审批已经没有任何
         执行机会，留在 pending 会让 UI 显示幽灵项、让 ``decide`` 返回 409。
         已决策的审批不受影响；返回被过期的记录（可能为空）。
+
+        **置 denied 与写审计行必须同一事务**（与 ``decide_approval`` 同标准）：
+        崩在中间会留下"已过期但无审计"的审批，审计作为不可变证据的链路就断了。
+        本方法**不改** tool_calls 状态：过期后调用可能仍停在 ``awaiting_approval``，
+        UI 应按会话终态渲染成"已终止"，不要当成活跃审批。
         """
         ...
 
@@ -493,6 +498,8 @@ class StateStore(Protocol):
         """按 ``created_at`` 升序返回**最新的** ``limit`` 条审计（不是最早的）。
 
         ``session_id=None`` 表示全部；``limit`` 必须 >= 1，否则抛 ``StateError``。
+        ``created_at`` 相同时（同一毫秒内连写多条）按**插入顺序**（SQLite 可用
+        ``rowid``，即 ``ORDER BY created_at, rowid``）——不要依赖数据库的隐式返回顺序。
         语义写死的原因是 SQL 的 ``ORDER BY created_at ASC LIMIT n`` 会返回**最早** N 条，
         与「看最近发生了什么」的直觉相反，两种实现都不报错、测试也测不出来。
 
