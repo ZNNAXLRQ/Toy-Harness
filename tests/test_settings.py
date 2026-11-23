@@ -137,6 +137,26 @@ def test_literal_api_key_is_used_as_is(config_file, monkeypatch):
     assert resolved.base_url == "http://localhost:8000/v1"
 
 
+def test_utf8_config_with_chinese_comments_is_readable(config_file):
+    """中文 Windows 默认按 GBK 读 yaml；显式 utf-8 之前，一行中文注释就能让启动失败。"""
+    config_file.write_text(
+        "# 服务端口\n"
+        "server:\n"
+        "  port: 9100  # 端口\n"
+        "llm:\n"
+        "  active: deepseek  # 当前生效的厂商\n"
+        "  providers:\n"
+        "    deepseek:\n"
+        "      api_key: literal-key  # 本地测试用\n",
+        encoding="utf-8",
+    )
+
+    settings = HarnessSettings()
+
+    assert settings.server.port == 9100
+    assert settings.resolve_provider().api_key == "literal-key"
+
+
 def test_missing_api_key_raises_with_actionable_message(config_file, monkeypatch):
     config_file.write_text(
         "llm:\n  active: deepseek\n  providers:\n    deepseek:\n      adapter: deepseek\n",

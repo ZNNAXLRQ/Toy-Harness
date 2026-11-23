@@ -111,6 +111,9 @@ class HarnessSettings(BaseSettings):
         env_nested_delimiter="__",
         env_file=ENV_FILE,
         env_file_encoding="utf-8",
+        # 必须显式指定：默认按本地编码读 yaml，中文 Windows 上是 GBK，
+        # 配置文件里只要有一行中文注释就会 UnicodeDecodeError。
+        yaml_file_encoding="utf-8",
         extra="ignore",
     )
 
