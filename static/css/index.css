@@ -23,6 +23,7 @@
 .message.update { background: var(--good); border-color: var(--good); }
 .message.update .avatar { background: #23785c; color: white; }
 .message-text { margin: 4px 0 0 38px; white-space: pre-wrap; }
+body[data-mode="web"] .message-text { margin-inline-start: 0; }
 .message > .meta { margin-left: 38px; }
 .composer { margin-top: 10px; }
 #composer { display: flex; align-items: end; gap: 8px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 15px; }

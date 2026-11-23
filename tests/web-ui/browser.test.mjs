@@ -1,16 +1,159 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const executable = process.env.TOY_HARNESS_BROWSER;
 const root = new URL('../../static/', import.meta.url);
 const mime = { html: 'text/html', css: 'text/css', js: 'application/javascript' };
+
+async function evaluateIn(run, expression) {
+  const { result, exceptionDetails } = await run('Runtime.evaluate', { expression, returnByValue: true });
+  assert.ok(!exceptionDetails, exceptionDetails?.exception?.description);
+  return result.value;
+}
+
+async function offlineServer(t) {
+  const reservation = createServer().listen(0, '127.0.0.1');
+  await once(reservation, 'listening');
+  const port = reservation.address().port;
+  await new Promise((resolve) => reservation.close(resolve));
+  const temp = await mkdtemp(join(tmpdir(), 'toy-harness-web-'));
+  const workspace = join(temp, 'workspace');
+  const logPath = join(temp, 'server.log');
+  await mkdir(workspace);
+  await writeFile(join(workspace, 'hello.txt'), 'hello Web UI');
+  const repo = fileURLToPath(new URL('../../', import.meta.url));
+  const python = process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python'];
+  const log = await open(logPath, 'w');
+  const server = spawn(join(repo, '.venv', ...python), ['-m', 'app.web', '--workspace', workspace,
+    '--offline', '--port', String(port)], { cwd: repo, stdio: ['ignore', log.fd, log.fd] });
+  let launchError;
+  server.once('error', (error) => { launchError = error; });
+  await log.close();
+  const stop = async () => {
+    if (server.pid && server.exitCode == null && server.signalCode == null) {
+      const exited = once(server, 'exit');
+      if (process.platform === 'win32') {
+        // The Windows venv redirector launches a separate Python process.
+        const killer = spawn('taskkill.exe', ['/pid', String(server.pid), '/t', '/f'], { stdio: 'ignore' });
+        await once(killer, 'exit');
+      }
+      if (server.exitCode == null && server.signalCode == null) server.kill();
+      await exited;
+    }
+  };
+  t.after(async () => { await stop(); await rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); });
+  const origin = `http://127.0.0.1:${port}`;
+  try {
+    await until(async () => {
+      if (launchError) throw launchError;
+      if (server.exitCode != null) throw new Error(`Web server exited (${server.exitCode})`);
+      return (await fetch(`${origin}/api/runtime`).catch(() => null))?.ok;
+    }, 'offline Web startup');
+  } catch (error) {
+    throw new Error(`${error.message}\n${(await readFile(logPath, 'utf8')).trim().split(/\r?\n/).slice(-10).join('\n')}`);
+  }
+  return origin;
+}
+
+test('browser: offline Web runs, current-turn events, live directory and isolated demo state', {
+  skip: !executable && 'Set TOY_HARNESS_BROWSER to run Chromium acceptance', timeout: 45_000,
+}, async (t) => {
+  const origin = await offlineServer(t);
+  const { tab, exceptions, requests } = await browser(t);
+  const run = await tab();
+  const evaluate = (expression) => evaluateIn(run, expression);
+  const navigate = (path) => run('Page.navigate', { url: `${origin}${path}` });
+  const text = (selector) => evaluate(`document.querySelector(${JSON.stringify(selector)})?.textContent ?? ''`);
+  const waitText = (selector, value) => until(async () => (await text(selector)).includes(value), value);
+  const ready = (page) => until(() => evaluate(`document.querySelector('#page[data-page=${page}]:not([hidden])[aria-busy="false"]') !== null`), page);
+  const send = (prompt) => evaluate(`{
+    document.querySelector('#message').value = ${JSON.stringify(prompt)};
+    document.querySelector('#composer').requestSubmit();
+    document.querySelector('#send').disabled;
+  }`);
+
+  // Seed the demo on this exact origin and tab before using Web mode.
+  await navigate('/html/index.html');
+  await ready('chat');
+  const demoChat = await text('#chat-stream');
+  const storage = () => evaluate('JSON.stringify({...sessionStorage})');
+  const demoStore = await storage();
+  await navigate('/');
+  await waitText('.badge.mode', 'Web 模式 · 离线');
+  await ready('chat');
+  assert.equal(await evaluate('location.search'), '?mode=web');
+  assert.equal(await evaluate(`!!document.querySelector('#write') || !!document.querySelector('#session-history a')`), false);
+  await waitText('#chat-stream', '还没有发送问题');
+  assert.notEqual(await text('#chat-stream'), demoChat);
+
+  assert.equal(await send('List my workspace'), true);
+  await waitText('#chat-stream', 'Offline demonstration finished. This is a scripted response.');
+  assert.deepEqual(await evaluate('[...document.querySelectorAll("#event-stream [data-event]")].map(e => e.dataset.event)'),
+    ['user_query', 'model_response', 'tool_start', 'tool_end', 'model_response', 'agent_end']);
+  const firstEvents = await text('#event-stream');
+  assert.match(firstEvents, /list_files · success/);
+  assert.equal(await send('Second independent question'), true);
+  await until(async () => (await text('#event-stream')) !== firstEvents &&
+    (await text('#event-stream')).includes('agent_end'), 'new run events');
+  const posts = requests.filter(({ method }) => method === 'POST');
+  assert.deepEqual(posts.map(({ url, postData }) => [url, JSON.parse(postData)]), [
+    [`${origin}/api/runs`, { prompt: 'List my workspace' }],
+    [`${origin}/api/runs`, { prompt: 'Second independent question' }],
+  ]);
+  assert.match(await text('#chat-stream'), /List my workspace/);
+  await run('Page.reload');
+  await waitText('#chat-stream', '还没有发送问题');
+
+  await evaluate(`document.querySelector('.task-nav a[href*="/tools.html?mode=web"]').click()`);
+  await ready('tools');
+  const expected = (await (await fetch(`${origin}/api/tools`)).json()).tools;
+  const directory = await evaluate(`[...document.querySelectorAll('#tool-list tr')].map(row => [
+    row.cells[0].textContent, row.cells[2].textContent
+  ])`);
+  assert.deepEqual(directory, expected.map(({ schema, enabled }) => [schema.function.name, enabled ? '已启用 · 只读' : '未启用']));
+  assert.ok(requests.some(({ url }) => url === `${origin}/api/tools`));
+  for (const page of ['approvals', 'sessions', 'checkpoints', 'subagents', 'audit', 'context']) {
+    await navigate(`/html/${page}.html?mode=web`);
+    await ready(page);
+    await waitText('#page', 'Web 尚未接入');
+    assert.equal(await evaluate('document.querySelectorAll("#page button, #page form").length'), 0);
+    assert.equal(await evaluate('[...document.querySelectorAll(".sidebar a")].every(a => new URL(a.href).search === "?mode=web")'), true);
+  }
+  await navigate('/html/settings.html?mode=web');
+  await ready('settings');
+  await waitText('#page', '离线 FakeProvider');
+  assert.doesNotMatch(await text('#page'), /OPENAI_API_KEY|base_url/);
+
+  // Block only API calls; keep the shell available to inspect failure and retry states.
+  await navigate('/');
+  await ready('chat');
+  await run('Network.setBlockedURLs', { urls: [`${origin}/api/*`] });
+  assert.equal(await send('Request while disconnected'), true);
+  await waitText('#error', '无法连接同源 Web 服务');
+  await waitText('#event-stream', '未收到本轮事件');
+  await navigate('/html/tools.html?mode=web');
+  await waitText('#error', '无法连接同源 Web 服务');
+  assert.equal(await evaluate('!document.querySelector("#retry").hidden && document.querySelector("#page").hidden'), true);
+  assert.equal(await text('#tool-list'), '');
+  await run('Network.setBlockedURLs', { urls: [] });
+  await evaluate('document.querySelector("#retry").click()');
+  await ready('tools');
+  assert.equal(await storage(), demoStore);
+  const beforeDemo = requests.length;
+  await navigate('/html/index.html');
+  await ready('chat');
+  assert.equal(await text('#chat-stream'), demoChat);
+  assert.equal(requests.slice(beforeDemo).some(({ url }) => new URL(url).pathname.startsWith('/api/')), false);
+  assert.deepEqual(exceptions, []);
+});
 
 async function until(check, description) {
   for (let i = 0; i < 100; i++) {
@@ -93,11 +236,7 @@ test('browser: workspace history, task ownership, settings keyboard, responsive 
   const { tab, exceptions, requests } = await browser(t);
 
   const client = (run) => {
-    const evaluate = async (expression) => {
-      const { result, exceptionDetails } = await run('Runtime.evaluate', { expression, returnByValue: true });
-      assert.ok(!exceptionDetails, exceptionDetails?.exception?.description);
-      return result.value;
-    };
+    const evaluate = (expression) => evaluateIn(run, expression);
     const ready = (page) => until(() => evaluate(`location.pathname === '/html/${page}.html' &&
       document.querySelector('#page:not([hidden])[aria-busy="false"]') !== null`), `${page} renders`);
     const open = async (page) => { await run('Page.navigate', { url: `${origin}/html/${page}.html` }); await ready(page); };

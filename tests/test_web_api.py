@@ -28,7 +28,7 @@ def tool_call(name, arguments, call_id="call-1"):
 def test_static_runtime_and_registry_directory(tmp_path):
     with client_for(tmp_path) as client:
         response = client.get("/")
-        assert response.history[0].headers["location"] == "/html/index.html"
+        assert response.history[0].headers["location"] == "/html/index.html?mode=web"
         assert response.status_code == 200 and "../js/app.js" in response.text
         for resource in ("/html/sidebar.html", "/css/index.css", "/js/app.js"):
             assert client.get(resource).status_code == 200

@@ -58,8 +58,7 @@ def create_app(workspace, *, offline=False, fake_provider_factory=None):
 
     @app.get("/", include_in_schema=False)
     def index():
-        # The existing pages use relative navigation under /html/.
-        return RedirectResponse("/html/index.html")
+        return RedirectResponse("/html/index.html?mode=web")
 
     @app.get("/api/runtime")
     def capabilities():

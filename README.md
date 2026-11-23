@@ -21,9 +21,18 @@ uv sync          # 创建 .venv，按 uv.lock 安装运行依赖与开发依赖
 uv run python -m app.web --workspace "C:\path\to\readable-workspace" --offline
 ```
 
+使用实际配置的模型时，改为：
+
+```powershell
+uv run python -m app.web --workspace "C:\path\to\readable-workspace"
+```
+
 该入口监听 `127.0.0.1:8080`（可用 `--port` 修改）。省略 `--offline` 时，沿用 CLI Provider 的 `OPENAI_API_KEY` 和 `BASE_URL` 环境变量或仓库根目录 `.env`；`--offline` 使用每轮新建的 FakeProvider，执行一次真实的工作区列表读取并返回脚本化回复，不访问模型服务。不要把仓库根目录、存有凭据的目录或非信任方可修改的目录作为工作区；读取和脱敏不等于操作系统隔离。不要将入口代理暴露到公网。
 
-- `/` 跳转至 `/html/index.html`；只挂载现有的 `/html`、`/css`、`/js`。静态页面仍是独立的演示模式，尚未调用下列 HTTP API。
+在浏览器打开 `http://127.0.0.1:8080/`；服务会跳转到 `/html/index.html?mode=web`。也可给其他页面地址加 `?mode=web` 直接打开，侧栏导航会保留该参数。不带该参数的静态页面仍为独立演示；Web 服务不可用时页面报错，不切换到演示。
+
+Web 模式已接入聊天、最近一次请求的事件摘要、工具目录和设置页的公开运行能力。每次发送只提交当前问题，模型不会收到前几轮；聊天记录只保留在当前页面内存中，刷新、离开页面或关标签页后不可恢复。审批、会话与恢复、检查点与回滚、子代理、审计日志及上下文页仅保留导航和未接入说明，不展示示例记录或提供模拟操作。设置页不读取或编辑实际模型配置，不显示或接收密钥。
+
 - `GET /api/runtime` 返回 Provider 模式及单轮、只读、事件随结果返回的能力；`GET /api/tools` 从实际注册表返回工具 `schema` 和 `enabled`，只有 `read_file`、`list_files` 可执行。
 - `POST /api/runs` 仅接受 `application/json` 和 `{"prompt":"…"}`（去掉首尾空白后 1–8192 字符）；不接受查询参数、工作区覆盖、密钥或模型端点配置。浏览器请求限同源；本机命令行客户端可不发送 `Origin`。
 - 每轮返回 `result`（运行 ID、成败、最终答复、统计及错误代码）和本轮已产生的脱敏 `events` 摘要；不包含原始历史、工具输入输出或内部诊断。这不是实时流，也不支持恢复 CLI 或 Web 会话。出错时只提供稳定代码：`tool_denied`（403）、`run_failed`（502）随本轮结果返回；校验失败（422）、Provider 初始化失败（503）和入口内部失败（500）等在未能返回轮次结果时只提供顶层 `error`。
@@ -70,8 +79,4 @@ python -m http.server 8765 --bind 127.0.0.1 --directory static
 node --test tests/web-ui
 ```
 
-浏览器验收另需 Node.js 22+ 和本机 Chromium 系浏览器。将 `TOY_HARNESS_BROWSER` 设为 Chrome、Edge 或 Chromium 的可执行文件绝对路径后运行同一命令；未设置时仅跳过浏览器用例，静态约束与服务回归仍会执行。
-
-### 将来接入 REST / SSE
-
-在 `static/js/service.js` 的装配点换掉演示适配器，保留异步查询、命令，以及 `subscribe(sessionId, listener) → unsubscribe` 的 UI 接口。`getSession` 是 UI 的聚合快照，不是宣称已存在的 HTTP 路径；应按最终 Web 契约取会话、消息、工具调用、审批等权威记录，同步后再接收该会话的 SSE 事件。断线、重复投递或切换会话时按权威快照校准、关闭旧订阅；不要把 SSE 内容当成持久状态，也不要把同一 `seq` 的不同事件视为重复。审批决定和恢复应继续分开，恢复时传入审批 ID。`demo.note` 是纯演示投影，不是服务端字段。当前演示页面不发出 REST/SSE 业务请求。
+浏览器验收另需 Node.js 22+ 和本机 Chromium 系浏览器。先运行 `uv sync`，将 `TOY_HARNESS_BROWSER` 设为 Chrome、Edge 或 Chromium 的可执行文件绝对路径后运行同一命令。浏览器用例会启动独立的静态演示和离线 Web 服务；未设置浏览器路径时只跳过浏览器用例，静态契约与服务回归仍会执行。
