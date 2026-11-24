@@ -783,3 +783,13 @@ async def test_abandoned_session_pending_approvals_are_expired_and_hidden(store)
 
     with pytest.raises(ApprovalError):
         await store.decide_approval(approval.id, ApprovalDecision.APPROVED, actor="teacher")
+
+async def test_pre_dispatch_validation_error_can_finish_as_failed(store):
+    """执行前校验失败（坏 JSON / 未知工具）没有外部副作用，允许 pending → failed。"""
+    session = await _turn_with_calls(store, "call-1")
+
+    row = await store.finish_tool_call("call-1", ToolResult("error", "bad arguments"))
+
+    assert row.status == ToolCallStatus.FAILED.value
+    tool_messages = [m for m in await store.list_messages(session.id) if m.role == MessageRole.TOOL]
+    assert len(tool_messages) == 1

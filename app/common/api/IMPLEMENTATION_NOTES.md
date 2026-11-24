@@ -30,7 +30,7 @@
 
 - `StateStore`：会话/消息/工具调用/观察/审批/审计/轮次投影/事务；
 - `CheckpointStore`、`SubagentRunStore`；
-- 验收：`tests/contracts` 的 59 条用例（见下）。
+- 验收：`tests/contracts` 的 60 条用例（见下）。
 
 几个**必须按字面实现**的点（审阅时会被重点看）：
 
@@ -62,7 +62,7 @@
 
 ```text
 tests/contracts/conftest.py 里 _sqlite_store()：把 skip 换成你的实现构造
-uv run pytest tests/contracts -q     # 59 条 memory + sqlite 全绿
+uv run pytest tests/contracts -q     # 60 条 memory + sqlite 全绿
 ```
 
 > 注意：现在 skip 让 CI 常绿。**交付当天必须改 conftest**，否则等于没验收。
@@ -71,9 +71,16 @@ uv run pytest tests/contracts -q     # 59 条 memory + sqlite 全绿
 
 实现位置：`app/tools/`。
 
-- `Tool`：`async execute(arguments) -> ToolResult`；内部可同步，由 registry 用
-  `asyncio.to_thread` 包一次；写操作成功时返回 `receipt`（补偿凭据）。
-- `ToolRegistry`：只执行不审批；`register` 同名必须抛 `ToolError`。
+> **迁移提醒（PR2 之后）**：A 的 loop 已经改成只认 `common/api` 的**异步**端口。
+> 现有 `app/tools/registry.py` 是原型实现（同步、依赖 `app/common/api/runtime.py`），
+> loop 跑不到它。B 开工时要做的是：把 `ToolRegistry` 实现成异步端口
+> （`async execute`、`get`、`schemas`）、工具保持同步函数、在**注册表内部**用
+> `asyncio.to_thread` 包一次；然后删除 `app/common/api/runtime.py` 与
+> `app/common/model/runtime.py`。参考替身：`tests/fakes/fake_tools.py`。
+
+- `Tool`：`async execute(arguments) -> ToolResult`；写操作成功返回 `receipt`。
+- `ToolRegistry`：`execute` 只执行不审批、不返回 denied；`get` 未知工具抛 `ToolError`；
+  `register` 同名必须抛 `ToolError`（运行期工具身份不变）。
 - `ApprovalService`：只做策略 + 四个委托方法（`record/decide/pending/find_for_call`
   全部委托 `StateStore`）。**不要自己开事务或连库**。
 - `AuditService`：`log` = **先对 Mapping 的值脱敏（`redact_values`）再 JSON 序列化**，
@@ -104,12 +111,14 @@ uv run pytest tests/contracts -q     # 59 条 memory + sqlite 全绿
 
 ## 4. A：core（loop / provider / subagent / container）
 
-- `AgentLoop.run_turn`：开头同事务写 `sessions.status=OPEN`；每轮 `provider.complete`；
-  `record_assistant_turn`；逐个调用 `approval.requires_approval` → `request` → 返回
-  `waiting_approval`，或 `claim_tool_call(pending→dispatched)` → 执行 → `finish_tool_call`。
-- `resume_turn`：按 `TurnState.open_call_ids` 恢复：已决策审批 → `claim(awaiting→approved)`
-  → `claim(approved→dispatched)` → 执行；被拒绝则写 `denied` 并结束本轮。
-- 同一会话加锁，保证单写者；`load_open_turn` 只在启动恢复与 turn 入口调用。
-- 前缀：`CompletionRequest.prefix` 每轮逐字节一致，不裁 prefix、不把时间戳塞进去。
-- 每轮把真实用量交给 `ContextManager.record_usage`，摘要用 `build_summary` + 写回
-  `role=summary` 消息。
+**PR2 已交付**（`app/core/loop/` + `app/core/provider/`）：
+
+- `TurnEngine`（`agent_loop_engine.py`）：模型↔工具状态机。顺序：有未终态调用先执行，
+  否则调模型；敏感调用落审批并**返回**挂起；拒绝写 denied 观察结果并终止整轮。
+- `DefaultAgentLoop`（`default_agent_loop.py`）：会话级 `asyncio.Lock` 单写者；
+  `resume_turn(approval_id=None)` 按审批记录恢复；`abandon_turn` 过期审批 + 置终态 + 审计。
+- `TurnProgress`（`turn_state.py`）：本轮进程内计数（iteration/tokens），不持久化。
+- `app/core/provider/`：OpenAI/DeepSeek（兼容接口共用）与 Claude（system/工具形状转换），
+  `provider_factory.build_provider(ResolvedProvider)` 是唯一装配入口。
+
+**PR3 待做**：`core/subagent/*`、`core/config/container.py`、把 `AgentLoop` 接到 Web。
