@@ -97,6 +97,7 @@ pytest-cov==7.1.0
 python-dotenv==1.2.4
     # via
     #   pydantic-settings
+    #   toy-harness
     #   uvicorn
 python-multipart==0.0.32
     # via toy-harness

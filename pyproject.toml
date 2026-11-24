@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "pyyaml>=6.0",
+    "python-dotenv>=1.0",
 
     # 网络：http_tool 与各 provider 的流式调用
     "httpx>=0.27",
