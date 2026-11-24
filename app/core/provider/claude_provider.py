@@ -189,9 +189,15 @@ class ClaudeProvider:
         tokens = (getattr(usage, "input_tokens", 0) or 0) + (
             getattr(usage, "output_tokens", 0) or 0
         )
-        finish_reason = "tool_calls" if tool_calls else STOP_REASON_MAP.get(
-            getattr(response, "stop_reason", None) or "", getattr(response, "stop_reason", None)
-        )
+        # 截断/拒答优先于 tool_calls：``max_tokens`` 截断时内容里可能带**残缺的
+        # tool_use**，若当成正常 tool_calls 返回，引擎会把它落库并执行。
+        raw_stop = getattr(response, "stop_reason", None) or ""
+        if raw_stop in {"max_tokens", "refusal"}:
+            finish_reason = STOP_REASON_MAP[raw_stop]
+        elif tool_calls:
+            finish_reason = "tool_calls"
+        else:
+            finish_reason = STOP_REASON_MAP.get(raw_stop, raw_stop or None)
         return ModelResponse(
             content=text or None,
             tool_calls=tool_calls,

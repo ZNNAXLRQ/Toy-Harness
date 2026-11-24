@@ -117,8 +117,19 @@ uv run pytest tests/contracts -q     # 61 条 memory + sqlite 全绿
   否则调模型；敏感调用落审批并**返回**挂起；拒绝写 denied 观察结果并终止整轮。
 - `DefaultAgentLoop`（`default_agent_loop.py`）：会话级 `asyncio.Lock` 单写者；
   `resume_turn(approval_id=None)` 按审批记录恢复；`abandon_turn` 过期审批 + 置终态 + 审计。
-- `TurnProgress`（`turn_state.py`）：本轮进程内计数（iteration/tokens），不持久化。
+- `TurnProgress`（`turn_state.py`）：本轮进程内计数。`iteration` 恢复时从
+  `TurnState.iteration` 续上（整轮预算不因挂起/重启重置）；`tokens` 无法从 schema
+  重建，恢复后从 0 开始（已在 `state_store` 标注为待决项）。
 - `app/core/provider/`：OpenAI/DeepSeek（兼容接口共用）与 Claude（system/工具形状转换），
   `provider_factory.build_provider(ResolvedProvider)` 是唯一装配入口。
 
 **PR3 待做**：`core/subagent/*`、`core/config/container.py`、把 `AgentLoop` 接到 Web。
+
+### Web/D 需要知道的 run_turn 语义
+
+- `run_turn(session_id, user_content=...)`：会话**已有未完成轮**（等待审批或有未终态
+  调用）时抛 `ConflictError`（HTTP 409），必须先 `resume_turn` 或 `abandon_turn`；
+- `run_turn(session_id)`（不带消息）= 恢复：没有 open turn → 409；审批未决策 →
+  返回 `WAITING_APPROVAL` 的 outcome（带 `pending_call_id`/`pending_approval_id`）；
+  已决策 → 继续执行；
+- 恢复/继续时 `max_iterations` 按**整轮**累计，不会因为挂起重置。

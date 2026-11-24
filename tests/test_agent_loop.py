@@ -617,3 +617,124 @@ async def test_event_contract_error_is_not_swallowed():
             name="read_file",
             unexpected_field="boom",
         )
+
+# --- PR2 复审第四轮（P1 残留 + P2）回归 ---
+
+
+async def test_approval_request_goes_through_the_service_port():
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+
+    await harness.loop.run_turn(session.id, user_content="write")
+
+    assert harness.approval.request_calls == 1
+
+
+async def test_resume_rejects_an_existing_but_undecided_approval():
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    first = await harness.loop.run_turn(session.id, user_content="write")
+
+    with pytest.raises(ConflictError):
+        await harness.loop.resume_turn(session.id, approval_id=first.pending_approval_id)
+
+    assert harness.tools.executed == []
+
+
+async def test_agents_document_is_cached_across_resume():
+    loader = FakeAgentsLoader(content="AGENTS v1", version="v1")
+    harness = Harness(
+        [response(call("write", "write_file", {})), response(content="done")],
+        sensitive={"write_file"},
+        agents=loader,
+        workspace=Path("."),
+    )
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="write")
+    first_prefix = harness.provider.requests[0].prefix
+
+    # 挂起期间文件变化：同一轮恢复必须复用同一份文档/前缀
+    loader.content = "AGENTS v2"
+    loader.version = "v2"
+    approval = await harness.state.get_approval_for_call("write")
+    await harness.approval.decide(approval.id, ApprovalDecision.APPROVED, actor="teacher")
+    outcome = await harness.loop.resume_turn(session.id, approval_id=approval.id)
+
+    assert outcome.status == TurnStatus.COMPLETED
+    assert loader.calls == 1
+    assert harness.provider.requests[1].prefix == first_prefix
+
+
+async def test_waiting_recovery_normalizes_stale_session_status():
+    harness = Harness([])
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    # 模拟崩溃窗口：审批与 awaiting 已提交，但 session.status 仍停在 idle
+    await harness.state.append_message(session.id, "user", "write")
+    await harness.state.record_assistant_turn(
+        session.id, response(call("c1", "write_file", {}))
+    )
+    await harness.state.record_approval_request(session.id, "c1", "write_file", "{}", "desc")
+
+    outcome = await harness.loop.run_turn(session.id)
+
+    assert outcome.status == TurnStatus.WAITING_APPROVAL
+    assert (await harness.state.load_session(session.id)).status == SessionStatus.WAITING_APPROVAL.value
+
+
+async def test_event_contract_error_propagates_through_drive(monkeypatch):
+    from app.common.event.agent_event import EventContractError
+    from app.common.event.event_type import EventType
+    from app.core.loop import agent_loop_engine
+
+    harness = Harness([response(content="done")])
+    session = await harness.session()
+    real_event = agent_loop_engine.AgentEvent
+
+    def exploding_event(*args, **kwargs):
+        if kwargs.get("type") == EventType.TURN_COMPLETED:
+            raise EventContractError("payload contract bug")
+        return real_event(*args, **kwargs)
+
+    monkeypatch.setattr(agent_loop_engine, "AgentEvent", exploding_event)
+
+    with pytest.raises(EventContractError):
+        await harness.loop.run_turn(session.id, user_content="hi")
+
+
+async def test_dispatch_claim_conflict_propagates_without_failing_session():
+    from tests.fakes.memory_state_store import MemoryStateStore as _Store
+
+    class StubbornClaimStore(_Store):
+        async def claim_tool_call(self, call_id, *, from_status, to_status):
+            if to_status == ToolCallStatus.DISPATCHED:
+                return False
+            return await super().claim_tool_call(
+                call_id, from_status=from_status, to_status=to_status
+            )
+
+    state = StubbornClaimStore()
+    provider = ScriptedProvider([response(call("read", "read_file", {}))])
+    tools = FakeToolRegistry()
+    tools.add("read_file", lambda arguments: "content")
+    events = RecordingEventPublisher()
+    engine = TurnEngine(
+        provider=provider,
+        tools=tools,
+        state=state,
+        context=PassThroughContext(),
+        approval=FakeApprovalService(state),
+        events=events,
+        config=LoopConfig(),
+    )
+    loop = DefaultAgentLoop(engine, state=state)
+    session = await state.create_session()
+
+    with pytest.raises(ConflictError):
+        await loop.run_turn(session.id, user_content="go")
+
+    assert (await state.load_session(session.id)).status == SessionStatus.OPEN.value
+    assert not any(str(event.type) == "turn_failed" for event in events.events)

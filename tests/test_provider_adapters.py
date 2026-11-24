@@ -306,3 +306,47 @@ async def test_openai_provider_rejects_empty_choices():
 
     with pytest.raises(ProviderError):
         await provider.complete(CompletionRequest(prefix=[], messages=[]))
+
+async def test_claude_truncated_tool_use_does_not_execute_the_tool():
+    """max_tokens 截断 + tool_use：必须当成不完整响应，不许执行被截断的调用。"""
+    from app.core.loop import DefaultAgentLoop, LoopConfig, TurnEngine
+    from tests.fakes.fake_context_events import PassThroughContext, RecordingEventPublisher
+    from tests.fakes.fake_tools import FakeApprovalService, FakeToolRegistry
+    from tests.fakes.memory_state_store import MemoryStateStore
+
+    client = fake_anthropic_client(
+        claude_response(
+            [SimpleNamespace(type="tool_use", id="t1", name="read_file", input={"file_path": "x"})],
+            stop_reason="max_tokens",
+        )
+    )
+    state = MemoryStateStore()
+    tools = FakeToolRegistry()
+    tools.add("read_file", lambda arguments: "content")
+    engine = TurnEngine(
+        provider=ClaudeProvider(client),
+        tools=tools,
+        state=state,
+        context=PassThroughContext(),
+        approval=FakeApprovalService(state),
+        events=RecordingEventPublisher(),
+        config=LoopConfig(),
+    )
+    loop = DefaultAgentLoop(engine, state=state)
+    session = await state.create_session()
+
+    outcome = await loop.run_turn(session.id, user_content="read it")
+
+    assert outcome.status.value == "failed"
+    assert outcome.error == "Incomplete model response"
+    assert tools.executed == []
+    assert await state.list_tool_calls(session.id) == []
+
+
+async def test_claude_omits_tools_when_empty():
+    client = fake_anthropic_client(claude_response([SimpleNamespace(type="text", text="ok")]))
+    provider = ClaudeProvider(client)
+
+    await provider.complete(CompletionRequest(prefix=[], messages=[]))
+
+    assert "tools" not in client.messages.kwargs

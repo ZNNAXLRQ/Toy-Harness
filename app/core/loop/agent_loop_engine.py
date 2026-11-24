@@ -101,6 +101,7 @@ class TurnEngine:
         self.events = events
         self.agents = agents
         self.config = config or LoopConfig()
+        self._agent_documents: dict[str, Any] = {}
 
     # ------------------------------------------------------------------ public
 
@@ -120,7 +121,6 @@ class TurnEngine:
         """
         await self._load_active_session(session_id)
         progress = TurnProgress(session_id=session_id)
-        document = self._load_agents_once()
 
         if user_content is not None:
             pending = await self.state.peek_open_turn(session_id)
@@ -140,7 +140,9 @@ class TurnEngine:
                 message_id=message.id,
                 content=user_content,
             )
-            return await self._drive(session_id, progress, document)
+            return await self._drive(
+                session_id, progress, self._load_agents_once(session_id)
+            )
 
         turn = await self.state.load_open_turn(session_id)
         if turn is None:
@@ -149,8 +151,10 @@ class TurnEngine:
         if turn.status == TurnStatus.FAILED:
             return await self._fail_unknown(session_id, progress, turn)
         if turn.status == TurnStatus.WAITING_APPROVAL:
-            return await self._handle_waiting(session_id, turn, progress, document)
-        return await self._drive(session_id, progress, document)
+            return await self._handle_waiting(session_id, turn, progress)
+        return await self._drive(
+            session_id, progress, self._load_agents_once(session_id)
+        )
 
     async def resume(self, session_id: str, *, approval_id: str | None = None) -> TurnOutcome:
         """消费已落库的审批决定并继续（要求决策已存在）。"""
@@ -159,7 +163,7 @@ class TurnEngine:
         if turn is None:
             raise ConflictError(f"session {session_id} has no open turn to resume")
         progress = TurnProgress(session_id=session_id, iteration=turn.iteration)
-        document = self._load_agents_once()
+        document = self._load_agents_once(session_id)
         if turn.status == TurnStatus.FAILED:
             return await self._fail_unknown(session_id, progress, turn)
         if turn.status == TurnStatus.WAITING_APPROVAL:
@@ -169,10 +173,13 @@ class TurnEngine:
         return await self._drive(session_id, progress, document)
 
     async def _handle_waiting(
-        self, session_id: str, turn: Any, progress: TurnProgress, document: Any
+        self, session_id: str, turn: Any, progress: TurnProgress
     ) -> TurnOutcome:
         approval = await self._approval_for_turn(session_id, turn)
         if approval.status == ApprovalStatus.PENDING.value:
+            # 崩溃窗口可能留下 stale 的 session.status（idle/open）；返回 WAITING 前归一，
+            # 否则 D 的重连快照（以 sessions.status 为准）会显示错误状态。
+            await self._set_status(session_id, SessionStatus.WAITING_APPROVAL)
             return TurnOutcome(
                 session_id=session_id,
                 status=TurnStatus.WAITING_APPROVAL,
@@ -182,7 +189,12 @@ class TurnEngine:
                 tokens=progress.tokens,
             )
         return await self._resume_with_approval(
-            session_id, turn, progress, document, approval_id=None, approval=approval
+            session_id,
+            turn,
+            progress,
+            self._load_agents_once(session_id),
+            approval_id=None,
+            approval=approval,
         )
 
     async def _resume_with_approval(
@@ -600,15 +612,20 @@ class TurnEngine:
             # 会话已经进入硬终态（例如并发恢复把它判了 failed）：不再覆盖。
             return
 
-    def _load_agents_once(self) -> Any | None:
-        """每轮只读一次 AGENTS.md。
+    def _load_agents_once(self, session_id: str) -> Any | None:
+        """每个会话只读一次 AGENTS.md（进程内缓存）。
 
-        每调用一次模型就重读会把"可能变化的文件内容"拼进 system prefix，直接击穿
-        prefix cache，也违反 ``AgentsMdLoader`` 契约（只在会话开始/建轮时读一次）。
+        每轮/每步重读会把"可能变化的文件内容"拼进 system prefix，直接击穿 prefix
+        cache，也违反 ``AgentsMdLoader`` 契约（只在会话开始读一次）。挂起恢复属于
+        同一轮的延续，必须复用同一份文档——文件变了只能新开会话或显式重建前缀。
         """
         if self.agents is None or self.config.workspace is None:
             return None
-        return self.agents.load(self.config.workspace)
+        document = self._agent_documents.get(session_id)
+        if document is None:
+            document = self.agents.load(self.config.workspace)
+            self._agent_documents[session_id] = document
+        return document
 
     def _build_prefix(self, document: Any | None) -> tuple[list[dict[str, Any]], str | None]:
         system = self.config.system_prompt

@@ -87,11 +87,13 @@ class FakeApprovalService:
     def __init__(self, store, sensitive: Sequence[str] = ()) -> None:
         self.store = store
         self.sensitive = set(sensitive)
+        self.request_calls = 0
 
     def requires_approval(self, tool_name: str, arguments: Mapping[str, Any]) -> bool:
         return tool_name in self.sensitive
 
     async def request(self, call: ToolCallView):
+        self.request_calls += 1
         return await self.store.record_approval_request(
             call.session_id,
             call.id,
