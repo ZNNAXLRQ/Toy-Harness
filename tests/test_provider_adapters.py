@@ -282,3 +282,27 @@ def test_factory_builds_each_adapter_with_expected_defaults():
 def test_factory_rejects_unknown_adapter():
     with pytest.raises(ConfigError):
         build_provider(_resolved("bogus"), client_factory=lambda adapter, resolved: None)
+
+async def test_claude_stop_reason_is_normalized():
+    """max_tokens/refusal 必须映射成引擎能识别的 length/content_filter。"""
+    cases = {
+        "max_tokens": "length",
+        "refusal": "content_filter",
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+    }
+    for raw, expected in cases.items():
+        client = fake_anthropic_client(claude_response([], stop_reason=raw))
+        provider = ClaudeProvider(client)
+
+        result = await provider.complete(CompletionRequest(prefix=[], messages=[]))
+
+        assert result.finish_reason == expected, raw
+
+
+async def test_openai_provider_rejects_empty_choices():
+    client = fake_openai_client(SimpleNamespace(choices=[], usage=None))
+    provider = OpenAIChatProvider(client)
+
+    with pytest.raises(ProviderError):
+        await provider.complete(CompletionRequest(prefix=[], messages=[]))

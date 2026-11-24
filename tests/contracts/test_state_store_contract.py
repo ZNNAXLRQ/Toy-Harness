@@ -793,3 +793,10 @@ async def test_pre_dispatch_validation_error_can_finish_as_failed(store):
     assert row.status == ToolCallStatus.FAILED.value
     tool_messages = [m for m in await store.list_messages(session.id) if m.role == MessageRole.TOOL]
     assert len(tool_messages) == 1
+
+async def test_pending_call_cannot_finish_as_success(store):
+    """执行前失败只允许 pending→failed；success 必须先 dispatched。"""
+    await _turn_with_calls(store, "call-1")
+
+    with pytest.raises(StateError):
+        await store.finish_tool_call("call-1", ToolResult("success", "should not pass"))

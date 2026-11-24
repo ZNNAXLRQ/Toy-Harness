@@ -4,6 +4,7 @@
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,8 +16,10 @@ from app.common.api.state_store import (
     ToolCallStatus,
     TurnStatus,
 )
+from app.common.event.agent_event import EventContractError
 from app.common.exception import ConflictError, ProviderError
 from app.core.loop import DefaultAgentLoop, LoopConfig, TurnEngine
+from tests.fakes.fake_agents import FakeAgentsLoader
 from tests.fakes.fake_context_events import PassThroughContext, RecordingEventPublisher
 from tests.fakes.fake_provider import ScriptedProvider
 from tests.fakes.fake_tools import FakeApprovalService, FakeToolRegistry
@@ -49,6 +52,8 @@ class Harness:
         max_iterations=15,
         context=None,
         events=None,
+        agents=None,
+        workspace=None,
     ):
         self.state = MemoryStateStore()
         self.provider = ScriptedProvider(list(responses))
@@ -64,7 +69,8 @@ class Harness:
             context=self.context,
             approval=self.approval,
             events=self.events,
-            config=LoopConfig(max_iterations=max_iterations),
+            agents=agents,
+            config=LoopConfig(max_iterations=max_iterations, workspace=workspace),
         )
         self.loop = DefaultAgentLoop(self.engine, state=self.state, audit=self.audit)
 
@@ -428,3 +434,186 @@ async def test_abandoning_a_finished_turn_is_rejected():
 
     with pytest.raises(ConflictError):
         await harness.loop.abandon_turn(session.id)
+
+# --- PR2 复审（P1/P2）补的回归用例 ---
+
+
+async def test_sending_message_while_waiting_is_rejected():
+    """挂起中再发新消息会把审批/调用挤出本轮，变成永久孤儿。"""
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="first")
+
+    with pytest.raises(ConflictError):
+        await harness.loop.run_turn(session.id, user_content="second")
+
+    assert len(await harness.state.list_pending_approvals(session.id)) == 1
+    assert harness.tools.executed == []
+
+
+async def test_sending_message_while_calls_pending_is_rejected():
+    harness = Harness([response(content="done")])
+    harness.tools.add("read_file", lambda arguments: "content")
+    session = await harness.session()
+    await harness.state.append_message(session.id, "user", "first")
+    await harness.state.record_assistant_turn(
+        session.id, response(call("read", "read_file", {"file_path": "x"}))
+    )
+
+    with pytest.raises(ConflictError):
+        await harness.loop.run_turn(session.id, user_content="second")
+
+    calls = await harness.state.list_tool_calls(session.id)
+    assert calls[0].status == ToolCallStatus.PENDING.value
+    assert harness.tools.executed == []
+
+
+async def test_run_turn_without_open_turn_raises_conflict():
+    harness = Harness([])
+    session = await harness.session()
+
+    with pytest.raises(ConflictError):
+        await harness.loop.run_turn(session.id)
+
+
+async def test_run_turn_on_completed_session_raises_conflict():
+    harness = Harness([response(content="done")])
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="hi")
+
+    with pytest.raises(ConflictError):
+        await harness.loop.run_turn(session.id)
+
+
+async def test_run_turn_returns_waiting_when_approval_still_undecided():
+    """恢复语义：还在等审批不是 409，而是返回 WAITING + 审批 id。"""
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    first = await harness.loop.run_turn(session.id, user_content="write")
+
+    outcome = await harness.loop.run_turn(session.id)
+
+    assert outcome.status == TurnStatus.WAITING_APPROVAL
+    assert outcome.pending_call_id == first.pending_call_id
+    assert outcome.pending_approval_id == first.pending_approval_id != None  # noqa: E711
+
+
+async def test_approved_crash_is_resumed_and_dispatched():
+    """崩在两次 CAS 之间（call=approved）：run(None) 应继续派发。"""
+    harness = Harness([response(content="finished")])
+    harness.tools.add("read_file", lambda arguments: "content")
+    session = await harness.session()
+    await harness.state.append_message(session.id, "user", "go")
+    await harness.state.record_assistant_turn(
+        session.id, response(call("c1", "read_file", {"file_path": "x"}))
+    )
+    approval = await harness.state.record_approval_request(
+        session.id, "c1", "read_file", '{"file_path": "x"}', "desc"
+    )
+    await harness.state.decide_approval(
+        approval.id, ApprovalDecision.APPROVED, actor="teacher"
+    )
+    await harness.state.claim_tool_call(
+        "c1",
+        from_status=ToolCallStatus.AWAITING_APPROVAL,
+        to_status=ToolCallStatus.APPROVED,
+    )
+
+    outcome = await harness.loop.run_turn(session.id)
+
+    assert outcome.status == TurnStatus.COMPLETED
+    assert harness.tools.executed == [("read_file", {"file_path": "x"})]
+
+
+async def test_prefix_is_stable_across_model_calls_in_one_turn():
+    loader = FakeAgentsLoader(content="AGENTS v1", version="v1")
+    harness = Harness(
+        [response(call("read", "read_file", {})), response(content="done")],
+        agents=loader,
+        workspace=Path("."),
+    )
+    harness.tools.add("read_file", lambda arguments: "content")
+    session = await harness.session()
+
+    await harness.loop.run_turn(session.id, user_content="go")
+
+    assert loader.calls == 1  # 每轮只读一次
+    assert harness.provider.requests[0].prefix == harness.provider.requests[1].prefix
+
+
+async def test_iteration_budget_is_not_reset_by_resume():
+    harness = Harness(
+        [response(call("write", "write_file", {}))],
+        sensitive={"write_file"},
+        max_iterations=1,
+    )
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="write")
+
+    approval = await harness.state.get_approval_for_call("write")
+    await harness.approval.decide(approval.id, ApprovalDecision.APPROVED, actor="teacher")
+    outcome = await harness.loop.resume_turn(session.id, approval_id=approval.id)
+
+    assert outcome.status == TurnStatus.FAILED
+    assert "Maximum iterations" in (outcome.error or "")
+    assert len(harness.provider.requests) == 1  # 恢复后没有再调模型
+
+
+async def test_denied_resume_publishes_approval_decided():
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="write")
+    approval = await harness.state.get_approval_for_call("write")
+    await harness.approval.decide(approval.id, ApprovalDecision.DENIED, actor="teacher")
+
+    await harness.loop.resume_turn(session.id, approval_id=approval.id)
+
+    decided = [event for event in harness.events.events if str(event.type) == "approval_decided"]
+    assert decided and decided[0].payload["decision"] == "denied"
+
+
+async def test_waiting_outcome_carries_approval_id():
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+
+    outcome = await harness.loop.run_turn(session.id, user_content="write")
+
+    approval = await harness.state.get_approval_for_call("write")
+    assert outcome.pending_approval_id == approval.id
+
+
+async def test_final_content_none_is_not_backfilled():
+    harness = Harness(
+        [
+            response(call("read", "read_file", {}), content="intermediate reasoning"),
+            response(content=None),
+        ]
+    )
+    harness.tools.add("read_file", lambda arguments: "content")
+    session = await harness.session()
+
+    outcome = await harness.loop.run_turn(session.id, user_content="go")
+
+    assert outcome.status == TurnStatus.COMPLETED
+    assert outcome.content is None
+    messages = await harness.state.list_messages(session.id)
+    assert messages[-1].content is None
+
+
+async def test_event_contract_error_is_not_swallowed():
+    harness = Harness([])
+    session = await harness.session()
+
+    with pytest.raises(EventContractError):
+        await harness.engine.publish(
+            "tool_start",
+            session.id,
+            call_id="c1",
+            name="read_file",
+            unexpected_field="boom",
+        )

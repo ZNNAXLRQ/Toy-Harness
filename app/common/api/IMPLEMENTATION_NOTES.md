@@ -30,7 +30,7 @@
 
 - `StateStore`：会话/消息/工具调用/观察/审批/审计/轮次投影/事务；
 - `CheckpointStore`、`SubagentRunStore`；
-- 验收：`tests/contracts` 的 60 条用例（见下）。
+- 验收：`tests/contracts` 的 61 条用例（见下）。
 
 几个**必须按字面实现**的点（审阅时会被重点看）：
 
@@ -62,7 +62,7 @@
 
 ```text
 tests/contracts/conftest.py 里 _sqlite_store()：把 skip 换成你的实现构造
-uv run pytest tests/contracts -q     # 60 条 memory + sqlite 全绿
+uv run pytest tests/contracts -q     # 61 条 memory + sqlite 全绿
 ```
 
 > 注意：现在 skip 让 CI 常绿。**交付当天必须改 conftest**，否则等于没验收。

@@ -6,7 +6,7 @@
 2. `schema.sql` —— 已由 A 写全（含新增的 `approvals` 表、`messages(session_id, seq)` 唯一索引）；
    这是唯一建表来源，字段语义看 `app/common/api/state_store.py` 的视图与注释。
 3. `tests/contracts/conftest.py` —— 你的接入点：把 `_sqlite_store()` 从 skip 换成实现构造，
-   60 条用例红转绿即验收。
+   61 条用例红转绿即验收。
 
 ## 为什么新增了 approvals 表
 

@@ -5,14 +5,17 @@
     (挂起恢复) → 有未终态调用就逐个执行 → 没有就调模型
               → 模型要工具就落库并执行 → 模型给最终回答就结束
 
-三条硬约束（来自契约层的评审）：
+四条硬约束（来自契约层与 PR2 复审）：
 
 1. **审批挂起不阻塞**：敏感调用先 ``record_approval_request`` 落库、把会话置
    ``waiting_approval``，然后 **返回**；恢复时先校验审批记录再消费。
 2. **派发只有一次**：执行前必须 ``claim_tool_call`` 抢到 CAS；抢不到就抛
    ``ConflictError``，绝不重试执行。
 3. **事件是 best-effort**：推送失败不影响本轮结果；但事件对象本身仍然要先构造，
-   构造期的 payload 校验错误是代码 bug，不能被吞掉。
+   构造期的 payload 校验错误抛 ``EventContractError``，不允许被吞掉。
+4. **一轮未完成时不许开新轮**：``run(user_content=...)`` 先 ``peek_open_turn``，
+   存在未完成轮就抛 ``ConflictError``——否则新消息会把旧的调用/审批挤出「本轮」范围，
+   变成永久孤儿（审批 pending、调用 awaiting，却再也 resume 不到）。
 
 工具失败（坏 JSON、未知工具、执行异常）一律折叠成 ``ToolResult`` 观察结果喂回模型；
 只有「拒绝」会终止整轮，防止模型绕开审批。
@@ -42,7 +45,7 @@ from app.common.api.state_store import (
 )
 from app.common.api.tool import ToolResult
 from app.common.api.tool_registry import ToolRegistry
-from app.common.event.agent_event import AgentEvent
+from app.common.event.agent_event import AgentEvent, EventContractError
 from app.common.event.event_publisher import EventPublisher
 from app.common.event.event_type import EventType
 from app.common.exception import (
@@ -104,11 +107,28 @@ class TurnEngine:
     async def run(
         self, session_id: str, *, user_content: str | None = None
     ) -> TurnOutcome:
-        """执行或恢复一轮（``user_content=None`` 表示恢复）。"""
-        session = await self._load_active_session(session_id)
+        """执行一轮新对话，或恢复/继续未完成的一轮。
+
+        语义（与 ``AgentLoop`` 契约一致）：
+
+        - 传 ``user_content``：**必须没有未完成轮**，否则 ``ConflictError``。
+          否则新消息会把上一轮的调用/审批挤出「本轮」范围，变成永久孤儿
+          （审批永远 pending、调用永远 awaiting，resume 再也找不到它）；
+        - 不传：接续已有轮次。没有 open turn → ``ConflictError``；
+          轮次已 FAILED → 返回失败；在等审批且**尚未决策** → 返回 WAITING
+          （不是 409——恢复语义要能表达「仍在等」，否则启动恢复会误报冲突）。
+        """
+        await self._load_active_session(session_id)
         progress = TurnProgress(session_id=session_id)
+        document = self._load_agents_once()
 
         if user_content is not None:
+            pending = await self.state.peek_open_turn(session_id)
+            if pending is not None:
+                raise ConflictError(
+                    f"session {session_id} has an unfinished turn; "
+                    "resume or abandon it before sending a new message"
+                )
             message = await self.state.append_message(
                 session_id, MessageRole.USER, user_content
             )
@@ -120,57 +140,105 @@ class TurnEngine:
                 message_id=message.id,
                 content=user_content,
             )
-        elif session.status == SessionStatus.WAITING_APPROVAL.value:
-            return await self.resume(session_id)
+            return await self._drive(session_id, progress, document)
 
-        return await self._drive(session_id, progress)
-
-    async def resume(self, session_id: str, *, approval_id: str | None = None) -> TurnOutcome:
-        """消费已落库的审批决定并继续。"""
-        await self._load_active_session(session_id)
         turn = await self.state.load_open_turn(session_id)
-        progress = TurnProgress(session_id=session_id)
-
         if turn is None:
             raise ConflictError(f"session {session_id} has no open turn to resume")
+        progress.iteration = turn.iteration
         if turn.status == TurnStatus.FAILED:
             return await self._fail_unknown(session_id, progress, turn)
-
         if turn.status == TurnStatus.WAITING_APPROVAL:
-            if turn.pending_call_id is None:
-                raise ConflictError(f"session {session_id} is waiting but has no pending call")
-            approval = await self.approval.find_for_call(turn.pending_call_id)
-            if approval is None:
-                raise ConflictError(
-                    f"tool call {turn.pending_call_id} is awaiting approval but has no record"
-                )
-            if approval_id is not None and approval.id != approval_id:
-                raise ConflictError(
-                    f"approval {approval_id} does not belong to pending call {turn.pending_call_id}"
-                )
-            if approval.status == ApprovalStatus.PENDING.value:
-                raise ConflictError(f"approval {approval.id} is not decided yet")
-            if approval.status == ApprovalStatus.DENIED.value:
-                return await self._deny_pending_turn(session_id, turn.pending_call_id, progress)
-            if not await self.state.claim_tool_call(
-                turn.pending_call_id,
-                from_status=ToolCallStatus.AWAITING_APPROVAL,
-                to_status=ToolCallStatus.APPROVED,
-            ):
-                raise ConflictError(
-                    f"approval for {turn.pending_call_id} was consumed by another resumer"
-                )
-            await self.publish(
-                EventType.APPROVAL_DECIDED,
-                session_id,
-                approval_id=approval.id,
-                call_id=turn.pending_call_id,
-                decision=approval.status,
-                actor=approval.decided_by or "system",
-            )
-            await self._set_status(session_id, SessionStatus.OPEN)
+            return await self._handle_waiting(session_id, turn, progress, document)
+        return await self._drive(session_id, progress, document)
 
-        return await self._drive(session_id, progress)
+    async def resume(self, session_id: str, *, approval_id: str | None = None) -> TurnOutcome:
+        """消费已落库的审批决定并继续（要求决策已存在）。"""
+        await self._load_active_session(session_id)
+        turn = await self.state.load_open_turn(session_id)
+        if turn is None:
+            raise ConflictError(f"session {session_id} has no open turn to resume")
+        progress = TurnProgress(session_id=session_id, iteration=turn.iteration)
+        document = self._load_agents_once()
+        if turn.status == TurnStatus.FAILED:
+            return await self._fail_unknown(session_id, progress, turn)
+        if turn.status == TurnStatus.WAITING_APPROVAL:
+            return await self._resume_with_approval(
+                session_id, turn, progress, document, approval_id=approval_id
+            )
+        return await self._drive(session_id, progress, document)
+
+    async def _handle_waiting(
+        self, session_id: str, turn: Any, progress: TurnProgress, document: Any
+    ) -> TurnOutcome:
+        approval = await self._approval_for_turn(session_id, turn)
+        if approval.status == ApprovalStatus.PENDING.value:
+            return TurnOutcome(
+                session_id=session_id,
+                status=TurnStatus.WAITING_APPROVAL,
+                pending_call_id=turn.pending_call_id,
+                pending_approval_id=approval.id,
+                iterations=progress.iteration,
+                tokens=progress.tokens,
+            )
+        return await self._resume_with_approval(
+            session_id, turn, progress, document, approval_id=None, approval=approval
+        )
+
+    async def _resume_with_approval(
+        self,
+        session_id: str,
+        turn: Any,
+        progress: TurnProgress,
+        document: Any,
+        *,
+        approval_id: str | None,
+        approval: Any = None,
+    ) -> TurnOutcome:
+        if approval is None:
+            approval = await self._approval_for_turn(session_id, turn)
+        if approval_id is not None and approval.id != approval_id:
+            raise ConflictError(
+                f"approval {approval_id} does not belong to pending call {turn.pending_call_id}"
+            )
+        if approval.status == ApprovalStatus.PENDING.value:
+            raise ConflictError(f"approval {approval.id} is not decided yet")
+
+        # 决策已经存在：无论批准还是拒绝，都把「谁批的」推给前端。
+        await self.publish(
+            EventType.APPROVAL_DECIDED,
+            session_id,
+            approval_id=approval.id,
+            call_id=turn.pending_call_id,
+            decision=approval.status,
+            actor=approval.decided_by or "system",
+        )
+        if approval.status == ApprovalStatus.DENIED.value:
+            return await self._deny_pending_turn(
+                session_id, turn.pending_call_id, progress
+            )
+        if not await self.state.claim_tool_call(
+            turn.pending_call_id,
+            from_status=ToolCallStatus.AWAITING_APPROVAL,
+            to_status=ToolCallStatus.APPROVED,
+        ):
+            raise ConflictError(
+                f"approval for {turn.pending_call_id} was consumed by another resumer"
+            )
+        await self._set_status(session_id, SessionStatus.OPEN)
+        return await self._drive(session_id, progress, document)
+
+    async def _approval_for_turn(self, session_id: str, turn: Any):
+        if turn.pending_call_id is None:
+            raise ConflictError(
+                f"session {session_id} is waiting but has no pending call"
+            )
+        approval = await self.approval.find_for_call(turn.pending_call_id)
+        if approval is None:
+            raise ConflictError(
+                f"tool call {turn.pending_call_id} is awaiting approval but has no record"
+            )
+        return approval
 
     async def publish(self, event_type: EventType, session_id: str, *, seq: int = 0, **payload: Any) -> None:
         """构造并发布事件；**只吞发布失败**，构造期的契约错误照常抛出。"""
@@ -184,7 +252,9 @@ class TurnEngine:
 
     # ---------------------------------------------------------------- driving
 
-    async def _drive(self, session_id: str, progress: TurnProgress) -> TurnOutcome:
+    async def _drive(
+        self, session_id: str, progress: TurnProgress, document: Any
+    ) -> TurnOutcome:
         try:
             while True:
                 turn = await self.state.load_open_turn(session_id)
@@ -192,6 +262,7 @@ class TurnEngine:
                     return await self._complete(session_id, progress)
                 if turn.status == TurnStatus.FAILED:
                     return await self._fail_unknown(session_id, progress, turn)
+                progress.iteration = max(progress.iteration, turn.iteration)
                 if turn.open_call_ids:
                     outcome = await self._run_open_calls(session_id, progress)
                     if outcome is not None:
@@ -201,9 +272,12 @@ class TurnEngine:
                     return await self._fail(
                         session_id, progress, "Maximum iterations reached without completion"
                     )
-                outcome = await self._model_step(session_id, progress)
+                outcome = await self._model_step(session_id, progress, document)
                 if outcome is not None:
                     return outcome
+        except (ConflictError, EventContractError):
+            # 并发争用 → 交给调用方（409）；事件 payload 错 → 代码 bug，不能被吞。
+            raise
         except ProviderError as error:
             return await self._fail(session_id, progress, f"ProviderError: {error.message}")
         except HarnessError as error:
@@ -215,8 +289,10 @@ class TurnEngine:
                 session_id, progress, redact(f"{type(error).__name__}: {error}")
             )
 
-    async def _model_step(self, session_id: str, progress: TurnProgress) -> TurnOutcome | None:
-        prefix, agents_version = self._build_prefix()
+    async def _model_step(
+        self, session_id: str, progress: TurnProgress, document: Any
+    ) -> TurnOutcome | None:
+        prefix, agents_version = self._build_prefix(document)
         await self._sync_prefix(session_id, prefix, agents_version)
 
         wire_messages = await self._wire_messages(session_id)
@@ -277,6 +353,23 @@ class TurnEngine:
                 continue
             status = ToolCallStatus(call.status)
 
+            if status == ToolCallStatus.AWAITING_APPROVAL:
+                # 会话状态陈旧成 OPEN 时可能走到这里：不要再建审批，直接回到等待态。
+                approval = await self.approval.find_for_call(call_id)
+                if approval is None:
+                    raise ConflictError(
+                        f"tool call {call_id} is awaiting approval but has no record"
+                    )
+                await self._set_status(session_id, SessionStatus.WAITING_APPROVAL)
+                return TurnOutcome(
+                    session_id=session_id,
+                    status=TurnStatus.WAITING_APPROVAL,
+                    pending_call_id=call_id,
+                    pending_approval_id=approval.id,
+                    iterations=progress.iteration,
+                    tokens=progress.tokens,
+                )
+
             if status == ToolCallStatus.APPROVED:
                 if not await self.state.claim_tool_call(
                     call_id,
@@ -310,13 +403,8 @@ class TurnEngine:
                 continue
 
             if self.approval.requires_approval(call.tool_name, arguments):
-                approval = await self.state.record_approval_request(
-                    session_id,
-                    call.id,
-                    call.tool_name,
-                    call.arguments or "{}",
-                    f"{call.tool_name}: {json.dumps(arguments, ensure_ascii=False)}",
-                )
+                # 审批记录由 ApprovalService 负责（B 的策略/描述扩展点在这里生效）。
+                approval = await self.approval.request(call)
                 await self._set_status(session_id, SessionStatus.WAITING_APPROVAL)
                 await self.publish(
                     EventType.APPROVAL_REQUIRED,
@@ -331,6 +419,7 @@ class TurnEngine:
                     session_id=session_id,
                     status=TurnStatus.WAITING_APPROVAL,
                     pending_call_id=call.id,
+                    pending_approval_id=approval.id,
                     iterations=progress.iteration,
                     tokens=progress.tokens,
                 )
@@ -389,7 +478,9 @@ class TurnEngine:
     async def _complete(
         self, session_id: str, progress: TurnProgress, content: str | None = None
     ) -> TurnOutcome:
-        final = content if content is not None else progress.last_content
+        # 不要用上一次模型调用的中间内容兜底：最后一条 assistant 消息才是权威的最终答复，
+        # 否则 outcome/事件/数据库三处内容会不一致。
+        final = content
         await self._set_status(session_id, SessionStatus.COMPLETED)
         if progress.iteration:
             await self.publish(
@@ -509,14 +600,22 @@ class TurnEngine:
             # 会话已经进入硬终态（例如并发恢复把它判了 failed）：不再覆盖。
             return
 
-    def _build_prefix(self) -> tuple[list[dict[str, Any]], str | None]:
+    def _load_agents_once(self) -> Any | None:
+        """每轮只读一次 AGENTS.md。
+
+        每调用一次模型就重读会把"可能变化的文件内容"拼进 system prefix，直接击穿
+        prefix cache，也违反 ``AgentsMdLoader`` 契约（只在会话开始/建轮时读一次）。
+        """
+        if self.agents is None or self.config.workspace is None:
+            return None
+        return self.agents.load(self.config.workspace)
+
+    def _build_prefix(self, document: Any | None) -> tuple[list[dict[str, Any]], str | None]:
         system = self.config.system_prompt
-        version: str | None = None
-        if self.agents is not None and self.config.workspace is not None:
-            document = self.agents.load(self.config.workspace)
-            version = document.version
-            if document.content:
-                system = f"{system}\n\n# AGENTS.md\n{document.content}"
+        version = getattr(document, "version", None)
+        content = getattr(document, "content", None)
+        if content:
+            system = f"{system}\n\n# AGENTS.md\n{content}"
         return [{"role": "system", "content": system}], version
 
     async def _sync_prefix(

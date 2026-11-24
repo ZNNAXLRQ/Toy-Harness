@@ -27,6 +27,20 @@ DEFAULT_MODEL = "claude-sonnet-4-5"
 DEFAULT_MAX_TOKENS = 4096
 """Anthropic 必须显式给 ``max_tokens``，这里是安全默认值。"""
 
+STOP_REASON_MAP: dict[str, str] = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "tool_use": "tool_calls",
+    # 与 OpenAI 兼容接口对齐：引擎靠这两个值判断「响应不完整、不许执行工具」。
+    "max_tokens": "length",
+    "refusal": "content_filter",
+}
+"""把 Anthropic 的 ``stop_reason`` 归一化成跨供应商的 ``finish_reason``。
+
+不归一化的话，``max_tokens`` 被截断的 ``tool_use`` 会被引擎当成正常响应执行，
+``refusal`` 也会被当成正常结束——这是语义 bug，不是测试缺失。
+"""
+
 
 def _parse_arguments(arguments: str) -> dict[str, Any]:
     try:
@@ -175,7 +189,9 @@ class ClaudeProvider:
         tokens = (getattr(usage, "input_tokens", 0) or 0) + (
             getattr(usage, "output_tokens", 0) or 0
         )
-        finish_reason = "tool_calls" if tool_calls else getattr(response, "stop_reason", None)
+        finish_reason = "tool_calls" if tool_calls else STOP_REASON_MAP.get(
+            getattr(response, "stop_reason", None) or "", getattr(response, "stop_reason", None)
+        )
         return ModelResponse(
             content=text or None,
             tool_calls=tool_calls,
