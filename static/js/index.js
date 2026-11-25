@@ -10,10 +10,19 @@
   const modeNote = $("#mode-note");
   const demoExample = $("#demo-example");
   const feed = $("#conversation-feed");
+  const emptyConversation = $(".empty-conversation", feed);
   const timeline = $("#event-timeline");
   const timelineEmpty = $("#timeline-empty");
   const eventCount = $("#event-count");
   const streamIndicator = $("#stream-indicator");
+  const viewButtons = [...document.querySelectorAll("[data-workspace-view]")];
+  const workspaceView = $("#workspace-view");
+  const workspaceViewTitle = $("#workspace-view-title");
+  const workspaceContent = $("#workspace-view-content");
+  const conversation = $("#chat-conversation");
+  const sessionTitle = $("#session-title");
+  const newSessionButton = $("#new-session");
+  const progressTemplate = $("#agent-progress-template");
 
   let mode = "approval";
   let config = { provider: "demo", demo_prompt: "" };
@@ -24,6 +33,12 @@
   const toolsByCall = new Map();
   const approvalsById = new Map();
   const requestsByIteration = new Map();
+  const sessions = [];
+  const auditEvents = [];
+  let progressCard = null;
+  let runStatus = "idle";
+  let selectedView = "chat";
+  let currentSession = null;
 
   const labels = {
     user_message: "用户任务",
@@ -51,6 +66,9 @@
   function setState(label, state = "") {
     runState.textContent = label;
     runState.dataset.state = state;
+    if (state === "running" || state === "waiting") runStatus = state;
+    else if (state === "complete" || state === "failed") runStatus = state;
+    refreshView();
   }
 
   function setStream(label, state = "") {
@@ -95,8 +113,133 @@
       article.append(foot);
     }
     feed.append(article);
+    if (role === "user" && progressTemplate && !progressCard) {
+      progressCard = progressTemplate.content.firstElementChild.cloneNode(true);
+      feed.append(progressCard);
+      updateProgress("任务已提交", "等待服务端事件", "", "");
+    }
     scrollTo(article);
     return article;
+  }
+
+  function updateProgress(phase, tool, observation, next) {
+    if (!progressCard) return;
+    for (const [hook, value] of Object.entries({
+      "[data-agent-phase]": phase,
+      "[data-agent-tool]": tool,
+      "[data-agent-observation]": observation,
+      "[data-agent-next]": next,
+    })) {
+      const node = $(hook, progressCard);
+      if (node) node.textContent = value;
+    }
+  }
+
+  function updateModeNote() {
+    modeNote.textContent =
+      mode === "approval"
+        ? "读取自动执行，写入前等待审批。"
+        : "当前 Web 工具将直接执行。";
+  }
+
+  function selectMode(nextMode) {
+    if (runStatus === "running" || runStatus === "waiting") return;
+    mode = nextMode;
+    for (const option of modeButtons) {
+      const selected = option.dataset.mode === mode;
+      option.classList.toggle("is-selected", selected);
+      option.setAttribute("aria-pressed", String(selected));
+    }
+    updateModeNote();
+    refreshView();
+  }
+
+  function refreshView() {
+    if (!workspaceView || !workspaceContent) return;
+    const active = runStatus === "running" || runStatus === "waiting";
+    if (newSessionButton) newSessionButton.disabled = active;
+    modeButtons.forEach((button) => {
+      button.disabled = active;
+    });
+    if (workspaceViewTitle)
+      workspaceViewTitle.textContent =
+        {
+          sessions: "会话记录",
+          tools: "工具",
+          audit: "审计日志",
+          rollback: "回滚",
+          subagents: "子 Agent",
+          settings: "设置",
+        }[selectedView] || "";
+    if (conversation) conversation.hidden = selectedView !== "chat";
+    workspaceView.hidden = selectedView === "chat";
+    workspaceContent.replaceChildren();
+    const line = (text) => {
+      const p = document.createElement("p");
+      p.textContent = text;
+      workspaceContent.append(p);
+    };
+    if (selectedView === "sessions") {
+      if (!sessions.length) line("还没有本页提交的运行记录。");
+      sessions.forEach((s) => {
+        const p = document.createElement("p");
+        p.textContent = `${s.prompt} · ${s.status}${s.result ? ` · ${s.result}` : ""}`;
+        workspaceContent.append(p);
+      });
+    } else if (selectedView === "tools") {
+      line("网页可调用读取文件、列出文件和写入文件。");
+      line(
+        mode === "approval"
+          ? "当前为需要审批，写入前需确认。"
+          : "当前为全权限，网页可用工具自动执行。",
+      );
+    } else if (selectedView === "audit") {
+      line(
+        auditEvents.length
+          ? "本次运行已收到的审批与工具事件："
+          : "本次运行尚未收到审批或工具事件。",
+      );
+      auditEvents.forEach((entry) => line(entry));
+      line("记录范围为当前页面的本轮运行。");
+    } else if (selectedView === "rollback")
+      line("当前 Web 运行不提供回滚操作。");
+    else if (selectedView === "subagents")
+      line("当前 Web 运行不提供子代理信息。");
+    else if (selectedView === "settings") {
+      line(
+        "模型提供方：" +
+          (config.provider === "demo" ? "演示" : config.provider || "未知"),
+      );
+      const settingsModes = document.createElement("div");
+      settingsModes.className = "mode-picker settings-modes";
+      settingsModes.setAttribute("role", "group");
+      settingsModes.setAttribute("aria-label", "工具调用权限");
+      for (const [value, label] of [
+        ["approval", "需要审批"],
+        ["full", "全权限"],
+      ]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.mode = value;
+        button.textContent = label;
+        button.className = "mode-option";
+        button.classList.toggle("is-selected", mode === value);
+        button.disabled = active;
+        button.setAttribute("aria-pressed", String(mode === value));
+        settingsModes.append(button);
+      }
+      workspaceContent.append(settingsModes);
+    }
+  }
+
+  function setView(name) {
+    selectedView = name;
+    viewButtons.forEach((button) => {
+      const selected = button.dataset.workspaceView === name;
+      if (selected) button.setAttribute("aria-current", "page");
+      else button.removeAttribute("aria-current");
+    });
+    refreshView();
   }
 
   function formattedTime(value) {
@@ -294,8 +437,17 @@
 
   function terminal(state, label, indicator) {
     setState(label, state);
+    const session = currentSession;
+    if (session) {
+      session.status = state === "complete" ? "已完成" : "失败";
+      session.result = state === "complete" ? "收到最终答复" : label;
+      refreshView();
+    }
     runButton.disabled = false;
-    runButton.querySelector("span:first-child").textContent = "再次运行";
+    modeButtons.forEach((button) => {
+      button.disabled = false;
+    });
+    runButton.querySelector("span:first-child").textContent = "再次发送";
     setStream(indicator, state === "failed" ? "error" : "");
     if (source) {
       source.close();
@@ -329,7 +481,10 @@
     const stamp = event.created_at;
 
     switch (type) {
-      case "user_message":
+      case "user_message": {
+        const message = safeString(payload.content ?? payload.message ?? "");
+        if (sessionTitle) sessionTitle.textContent = message || "新会话";
+        if (currentSession) currentSession.prompt = message;
         addMessage(
           "user",
           "你的任务",
@@ -343,7 +498,14 @@
           stamp,
         );
         setState("正在执行", "running");
+        updateProgress(
+          "任务已送达",
+          "等待模型处理",
+          "服务端已确认收到任务",
+          "等待模型请求事件",
+        );
         break;
+      }
       case "model_request": {
         const info = [`第 ${payload.iteration ?? "?"} 轮`, payload.provider]
           .filter(Boolean)
@@ -357,6 +519,12 @@
         row.item.dataset.tone = "active";
         requestsByIteration.set(String(payload.iteration), row.item);
         setState("模型处理中", "running");
+        updateProgress(
+          `第 ${payload.iteration ?? "?"} 轮：模型处理中`,
+          "模型请求",
+          "已收到模型请求事件",
+          "等待模型响应",
+        );
         break;
       }
       case "model_response": {
@@ -378,6 +546,12 @@
           stamp,
         );
         row.item.dataset.tone = "done";
+        updateProgress(
+          "已收到模型响应",
+          names.length ? names.join("、") : "无工具调用",
+          safeString(desc),
+          names.length ? "等待工具事件或下一轮模型请求" : "等待任务完成事件",
+        );
         break;
       }
       case "approval_required": {
@@ -388,10 +562,17 @@
           stamp,
         );
         row.item.dataset.tone = "warning";
-        if (mode === "approval") {
-          makeApproval(payload, stamp);
-          setState("等待审批", "waiting");
-        }
+        makeApproval(payload, stamp);
+        auditEvents.push(`审批请求：${safeString(payload.tool_name, "工具")}`);
+        refreshView();
+        setState("等待审批", "waiting");
+        updateProgress(
+          "等待审批",
+          safeString(payload.tool_name, "工具"),
+          "服务端发出了审批请求",
+          "批准调用或拒绝",
+        );
+        if (selectedView !== "chat") setView("chat");
         break;
       }
       case "approval_decided": {
@@ -407,6 +588,10 @@
           stamp,
         );
         row.item.dataset.tone = denied || timedOut ? "error" : "done";
+        auditEvents.push(
+          `审批决定：${decision} · ${safeString(payload.tool_name || payload.call_id, "调用")}`,
+        );
+        refreshView();
         const record = approvalsById.get(safeString(payload.approval_id));
         if (record && record.actions.isConnected) {
           record.actions.remove();
@@ -416,20 +601,60 @@
           record.card.append(status);
         }
         setState(
-          timedOut ? "审批已超时" : denied ? "审批已拒绝" : "正在恢复执行",
-          denied || timedOut ? "failed" : "running",
+          timedOut
+            ? "审批已超时，等待任务结束"
+            : denied
+              ? "审批已拒绝，等待任务结束"
+              : "正在恢复执行",
+          "running",
+        );
+        updateProgress(
+          `审批${decision}`,
+          safeString(payload.tool_name || payload.call_id, "工具"),
+          `收到服务端审批决定：${decision}`,
+          denied || timedOut ? "运行已停止" : "等待后续运行事件",
         );
         break;
       }
       case "tool_start":
         updateToolCard(safeString(payload.call_id), payload, type, stamp);
+        auditEvents.push(
+          `工具开始：${safeString(payload.name || payload.tool_name, "工具")}`,
+        );
+        refreshView();
+        updateProgress(
+          "工具执行中",
+          safeString(payload.name || payload.tool_name, "工具"),
+          "已收到工具开始事件",
+          "等待工具结果事件",
+        );
         setState("工具执行中", "running");
         break;
       case "tool_end":
         updateToolCard(safeString(payload.call_id), payload, type, stamp);
+        auditEvents.push(
+          `工具结果：${safeString(payload.name || payload.tool_name, "工具")} · ${safeString(payload.status, "状态未知")}`,
+        );
+        refreshView();
+        updateProgress(
+          "工具已返回",
+          safeString(payload.name || payload.tool_name, "工具"),
+          safeString(payload.status, "工具结果已收到"),
+          "等待下一轮模型请求或任务完成",
+        );
         break;
       case "tool_skipped":
         updateToolCard(safeString(payload.call_id), payload, type, stamp);
+        auditEvents.push(
+          `工具未执行：${safeString(payload.name || payload.tool_name, "工具")} · ${safeString(payload.reason, "")}`,
+        );
+        refreshView();
+        updateProgress(
+          "工具未执行",
+          safeString(payload.name || payload.tool_name, "工具"),
+          safeString(payload.reason, "收到工具跳过事件"),
+          "等待后续事件",
+        );
         break;
       case "turn_completed": {
         const row = addTimelineItem(
@@ -441,6 +666,9 @@
         row.item.dataset.tone = "done";
         if (payload.content)
           addMessage("assistant", "Agent · 最终答复", payload.content);
+        if (currentSession)
+          currentSession.result = safeString(payload.content, "任务完成");
+        updateProgress("任务已完成", "", "收到任务完成事件", "可开始新会话");
         terminal("complete", "已完成", "事件流已结束");
         break;
       }
@@ -453,6 +681,12 @@
           stamp,
         );
         row.item.dataset.tone = "error";
+        updateProgress(
+          "任务失败",
+          "",
+          safeString(reason),
+          "可检查事件时间线后重新运行",
+        );
         for (const record of approvalsById.values()) {
           if (!record.actions.isConnected) continue;
           record.actions.remove();
@@ -496,10 +730,14 @@
         setStream("连接中断 · 正在自动重连", "reconnecting");
       } else {
         source = null;
+        if (currentSession && currentSession.status === "运行中") {
+          currentSession.status = "事件流关闭";
+          currentSession.result = "未收到终态事件";
+        }
         setState("事件流已关闭", "failed");
         setStream("事件流已关闭", "error");
         runButton.disabled = false;
-        runButton.querySelector("span:first-child").textContent = "再次运行";
+        runButton.querySelector("span:first-child").textContent = "再次发送";
       }
     };
     Object.keys(labels).forEach((type) =>
@@ -525,11 +763,8 @@
       if (isDemo) {
         demoExample.hidden = false;
         if (!promptInput.value) promptInput.value = config.demo_prompt || "";
-        modeNote.textContent =
-          mode === "approval"
-            ? "演示任务会读取并更新 notes.txt；读取自动执行，写入前会展示参数并等待你的决定。"
-            : "演示任务会读取并更新 notes.txt；所选模式允许工具直接执行。";
       }
+      refreshView();
     } catch {
       providerLabel.textContent = "服务配置暂不可用";
       setStream("无法读取服务配置", "error");
@@ -537,20 +772,7 @@
   }
 
   modeButtons.forEach((button) =>
-    button.addEventListener("click", () => {
-      mode = button.dataset.mode;
-      modeButtons.forEach((option) => {
-        const selected = option === button;
-        option.classList.toggle("is-selected", selected);
-        option.setAttribute("aria-pressed", String(selected));
-      });
-      modeNote.textContent =
-        mode === "approval"
-          ? config.provider === "demo"
-            ? "演示任务会读取并更新 notes.txt；读取自动执行，写入前会展示参数并等待你的决定。"
-            : "读取与目录查看会自动执行；写入文件前会展示完整参数并等待你的决定。"
-          : "工具调用将自动执行，不会显示审批卡片。请确认任务指令范围明确。";
-    }),
+    button.addEventListener("click", () => selectMode(button.dataset.mode)),
   );
 
   demoExample.addEventListener("click", () => {
@@ -560,6 +782,7 @@
 
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
+    if (runButton.disabled) return;
     hideError();
     const prompt = promptInput.value.trim();
     if (!prompt) {
@@ -571,10 +794,17 @@
       source.close();
       source = null;
     }
+    runStatus = "running";
+    if (sessionTitle) sessionTitle.textContent = prompt;
+    modeButtons.forEach((button) => {
+      button.disabled = true;
+    });
     activeRun = null;
     seenSequences = new Set();
     toolsByCall.clear();
     approvalsById.clear();
+    auditEvents.length = 0;
+    progressCard = null;
     requestsByIteration.clear();
     eventTotal = 0;
     eventCount.textContent = "0";
@@ -600,6 +830,9 @@
         );
       if (!data.run_id) throw new Error("服务端没有返回 run_id。");
       activeRun = data.run_id;
+      currentSession = { prompt, status: "运行中", result: "" };
+      sessions.unshift(currentSession);
+      refreshView();
       runButton.disabled = true;
       runButton.querySelector("span:first-child").textContent = "运行中";
       connectEvents(activeRun);
@@ -609,8 +842,56 @@
       setState("启动失败", "failed");
       setStream("无法创建事件流", "error");
       showError(error.message);
+      runStatus = "failed";
+      sessions.unshift({ prompt, status: "启动失败", result: error.message });
+      currentSession = sessions[0];
+      refreshView();
     }
   });
 
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-workspace-view]");
+    if (button && !button.disabled) setView(button.dataset.workspaceView);
+    const settingMode = event.target.closest(
+      "#workspace-view-content [data-mode]",
+    );
+    if (settingMode && !settingMode.disabled) {
+      selectMode(settingMode.dataset.mode);
+    }
+  });
+  if (newSessionButton)
+    newSessionButton.addEventListener("click", () => {
+      if (runStatus === "running" || runStatus === "waiting") return;
+      if (source) {
+        source.close();
+        source = null;
+      }
+      feed.replaceChildren(emptyConversation.cloneNode(true));
+      timeline.replaceChildren();
+      timelineEmpty.hidden = false;
+      eventCount.textContent = "0";
+      eventTotal = 0;
+      seenSequences.clear();
+      toolsByCall.clear();
+      approvalsById.clear();
+      requestsByIteration.clear();
+      auditEvents.length = 0;
+      activeRun = null;
+      currentSession = null;
+      progressCard = null;
+      promptInput.value = config.provider === "demo" ? config.demo_prompt : "";
+      hideError();
+      if (sessionTitle) sessionTitle.textContent = "新会话";
+      runStatus = "idle";
+      modeButtons.forEach((button) => {
+        button.disabled = false;
+      });
+      setState("等待任务", "");
+      setStream("就绪", "");
+      runButton.querySelector("span:first-child").textContent = "发送";
+      setView("chat");
+    });
+
+  setView("chat");
   loadConfig();
 })();
