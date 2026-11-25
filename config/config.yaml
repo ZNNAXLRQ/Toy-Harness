@@ -1,0 +1,56 @@
+# Toy Harness 运行配置
+#
+# - 唯一的配置文件；改完重启生效。
+# - 环境变量可以覆盖：HARNESS_SERVER__PORT / HARNESS_LLM__ACTIVE / HARNESS_LOGGING__LEVEL 等。
+# - 密钥一律写成 ${VAR} 占位符，从环境变量或 .env 读取，不要写进仓库。
+# - 注意：providers 一旦在这里出现，就整段替换代码里的三家默认预设，所以要么全写、
+#   要么整段不要写（不做深合并，避免"以为改了其实还在用默认值"）。
+# - 拼错的键会直接报错（extra="forbid"），不会静默回落默认值。
+
+server:
+  port: 8080
+
+database:
+  path: ./data/harness.db
+
+workspace:
+  # 工具的工作区根目录；相对路径按项目根解析
+  path: ./workspace
+
+llm:
+  # 当前生效的 provider。切换厂商只改这一行（或设 HARNESS_LLM__ACTIVE）。
+  active: deepseek
+
+  providers:
+    deepseek:
+      adapter: deepseek
+      api_key: ${DEEPSEEK_API_KEY}
+      # base_url 省略 → 使用适配器的默认域名
+
+    openai:
+      adapter: openai
+      api_key: ${OPENAI_API_KEY}
+
+    claude:
+      adapter: claude
+      api_key: ${ANTHROPIC_API_KEY}
+
+    # 自定义 provider 示例：自建网关 / OpenRouter / vLLM 这类 OpenAI 兼容端点。
+    # 指定 base_url 时**必须显式写 api_key**（不会回落到厂商官方密钥，防止把官方
+    # 密钥发给非官方地址）。
+    # gateway:
+    #   adapter: openai
+    #   base_url: http://localhost:8000/v1
+    #   model: qwen-max
+    #   api_key: ${GW_KEY}
+
+agent:
+  max_iterations: 15
+  token_budget: 32000
+
+subagent:
+  max_concurrency: 2
+  max_depth: 2
+
+logging:
+  level: INFO

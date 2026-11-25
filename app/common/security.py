@@ -14,10 +14,26 @@ def redact(value):
 
 
 def redact_value(value):
+    """递归脱敏值**和键**（原型事件层用的宽口径版本）。"""
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
         return {redact(key): redact_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact_value(item) for item in value]
+    return value
+
+
+def redact_values(value):
+    """只脱敏**值**，保留键名。
+
+    用于事件 payload、审计 detail 这类「键本身是契约」的结构：键被替换会让前端取不到
+    字段、让 payload 白名单校验误报。嵌套 dict/list 同样只处理值。
+    """
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {key: redact_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_values(item) for item in value]
     return value
