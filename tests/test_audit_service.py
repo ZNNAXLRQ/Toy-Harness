@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.fakes.memory_audit_service import MemoryAuditService
+from app.tools.audit import DefaultAuditService
 from tests.fakes.memory_state_store import MemoryStateStore
 
 
@@ -15,7 +15,7 @@ async def store():
 
 @pytest.fixture
 async def service(store):
-    return MemoryAuditService(store)
+    return DefaultAuditService(store)
 
 
 async def test_mapping_detail_is_redacted_before_serialization(service, store, monkeypatch):

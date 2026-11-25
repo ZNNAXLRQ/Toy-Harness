@@ -2,14 +2,20 @@
 # 以及 D:/Programs/Python/OOAD/Assignment1/support/assessment.py:validate_tool_interfaces（271–306 行）。
 # 功能：保留注册、签名绑定和错误回传；增加内置 Schema 子集校验、默认拒绝和敏感工具审批。
 # 后续：完整 JSON Schema/插件校验、持久化执行状态、幂等键和审批重放保护；当前不是持久化调度器。
+import asyncio
 import inspect
 import json
 from copy import deepcopy
+from typing import Any, Callable, Mapping
 
 from app.common.api.runtime import ApprovalService
+from app.common.api.tool import Tool, ToolResult as AsyncToolResult, ToolSpec
+from app.common.exception import ToolError
 from app.common.model.runtime import ApprovalRequest, ToolResult
+from app.common.security import redact, redact_value
 from app.tools.approval import DenyApproval
 from app.tools.builtin import BuiltinTools
+from app.tools.file_write import FileWrite
 from app.tools.schemas import TOOL_SCHEMAS
 from app.tools.workspace import Workspace
 
@@ -112,3 +118,74 @@ def create_builtin_registry(workspace, approval=None, timeout=15.0):
     functions = {item["function"]["name"]: getattr(builtin, item["function"]["name"]) for item in TOOL_SCHEMAS}
     return ToolRegistry(TOOL_SCHEMAS, functions, scope.root, approval,
                         sensitive={"write_file", "execute_command", "run_python"})
+
+
+class _FunctionTool:
+    def __init__(self, spec: ToolSpec, function: Callable[..., ToolResult]):
+        self.spec = spec
+        self._function = function
+
+    async def execute(self, arguments: Mapping[str, Any]) -> AsyncToolResult:
+        result = await asyncio.to_thread(self._function, **arguments)
+        return AsyncToolResult(result.status, result.data)
+
+    async def rollback(self, receipt: str) -> AsyncToolResult:
+        raise ToolError(f"{self.spec.name} cannot be rolled back")
+
+
+class DefaultToolRegistry:
+    def __init__(self):
+        self._tools: dict[str, Tool] = {}
+        self._schemas: dict[str, dict[str, Any]] = {}
+
+    @property
+    def schemas(self) -> list[dict[str, Any]]:
+        return deepcopy(list(self._schemas.values()))
+
+    def register(self, tool: Tool) -> None:
+        spec = tool.spec
+        if not spec.name or spec.name in self._tools:
+            raise ToolError(f"Missing or duplicate tool name: {spec.name!r}")
+        if spec.parameters.get("type") != "object":
+            raise ToolError(f"{spec.name}: tool parameters must use an object schema")
+        self._schemas[spec.name] = {"type": "function", "function": {
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": deepcopy(dict(spec.parameters)),
+        }}
+        self._tools[spec.name] = tool
+
+    def get(self, name: str) -> Tool:
+        try:
+            return self._tools[name]
+        except KeyError as error:
+            raise ToolError(f"Unknown tool: {name}") from error
+
+    async def execute(self, call_id: str, name: str, arguments: Mapping[str, Any]) -> AsyncToolResult:
+        tool = self.get(name)
+        try:
+            values = dict(arguments)
+            validate_arguments(values, self._schemas[name]["function"]["parameters"])
+            result = await tool.execute(values)
+        except Exception as error:
+            return AsyncToolResult("error", redact(f"Tool {name} failed ({type(error).__name__}): {error}"))
+        if not isinstance(result, AsyncToolResult) or result.status not in {"success", "error"}:
+            return AsyncToolResult("error", f"Tool {name} returned an invalid status")
+        if result.status == "error":
+            return AsyncToolResult("error", redact_value(result.data))
+        return result
+
+
+def create_async_builtin_registry(workspace, timeout=15.0) -> DefaultToolRegistry:
+    scope = Workspace(workspace)
+    builtin = BuiltinTools(scope, timeout=timeout)
+    functions = {item["function"]["name"]: getattr(builtin, item["function"]["name"]) for item in TOOL_SCHEMAS}
+    errors = validate_tool_interfaces(TOOL_SCHEMAS, functions)
+    if errors:
+        raise ToolError("; ".join(errors))
+    registry = DefaultToolRegistry()
+    for item in TOOL_SCHEMAS:
+        spec = ToolSpec(**item["function"])
+        tool = FileWrite(scope, spec) if spec.name == "write_file" else _FunctionTool(spec, functions[spec.name])
+        registry.register(tool)
+    return registry

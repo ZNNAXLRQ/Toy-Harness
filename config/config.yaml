@@ -25,6 +25,7 @@ llm:
     deepseek:
       adapter: deepseek
       api_key: ${DEEPSEEK_API_KEY}
+      model: deepseek-flash
       # base_url 省略 → 使用适配器的默认域名
 
     openai:
