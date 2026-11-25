@@ -26,6 +26,16 @@ def test_event_serializes_to_sse_frame():
     assert body["seq"] == 3
 
 
+def test_model_request_can_start_timeline_before_model_returns():
+    event = AgentEvent(
+        type="model_request", session_id="s1", seq=2,
+        payload={"iteration": 1, "provider": "deepseek-flash"},
+    )
+    frame = event.to_sse()
+    assert frame["event"] == "model_request"
+    assert json.loads(frame["data"])["payload"]["iteration"] == 1
+
+
 def test_event_payload_is_validated_against_the_contract():
     with pytest.raises(ValueError):
         AgentEvent(type=EventType.TOOL_START, session_id="s1", payload={"call_id": "c1", "name": "x", "secret": "boom"})

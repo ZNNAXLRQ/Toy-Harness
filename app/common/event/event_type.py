@@ -17,6 +17,7 @@ from enum import StrEnum
 class EventType(StrEnum):
     # 会话与消息
     USER_MESSAGE = "user_message"
+    MODEL_REQUEST = "model_request"
     MODEL_RESPONSE = "model_response"
 
     # 工具
@@ -43,6 +44,7 @@ class EventType(StrEnum):
 
 PAYLOAD_FIELDS: dict[EventType, frozenset[str]] = {
     EventType.USER_MESSAGE: frozenset({"message_id", "content"}),
+    EventType.MODEL_REQUEST: frozenset({"iteration", "provider"}),
     EventType.MODEL_RESPONSE: frozenset({"iteration", "content", "finish_reason", "tool_calls"}),
     EventType.TOOL_START: frozenset({"iteration", "call_id", "name", "arguments"}),
     EventType.TOOL_END: frozenset(
@@ -54,7 +56,7 @@ PAYLOAD_FIELDS: dict[EventType, frozenset[str]] = {
     ),
     EventType.APPROVAL_DECIDED: frozenset({"approval_id", "call_id", "decision", "actor"}),
     EventType.TURN_COMPLETED: frozenset({"iterations", "tokens", "content"}),
-    EventType.TURN_FAILED: frozenset({"error", "unknown_calls"}),
+    EventType.TURN_FAILED: frozenset({"error", "code", "unknown_calls"}),
     EventType.SUBAGENT_STARTED: frozenset({"run_id", "task_id", "prompt"}),
     EventType.SUBAGENT_FINISHED: frozenset({"run_id", "status", "summary", "tokens"}),
     EventType.CHECKPOINT_CREATED: frozenset({"checkpoint_id", "seq", "description"}),
@@ -63,6 +65,7 @@ PAYLOAD_FIELDS: dict[EventType, frozenset[str]] = {
 
 REQUIRED_PAYLOAD_FIELDS: dict[EventType, frozenset[str]] = {
     EventType.USER_MESSAGE: frozenset({"content"}),
+    EventType.MODEL_REQUEST: frozenset({"iteration"}),
     EventType.MODEL_RESPONSE: frozenset({"iteration"}),
     EventType.TOOL_START: frozenset({"call_id", "name"}),
     EventType.TOOL_END: frozenset({"call_id", "status"}),
