@@ -8,7 +8,7 @@ from typing import Any
 
 from app.core.provider.openai_provider import OpenAIChatProvider
 
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 
 

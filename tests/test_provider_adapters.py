@@ -113,7 +113,7 @@ async def test_deepseek_provider_defaults():
     provider = DeepSeekProvider(fake_openai_client(openai_response(content="ok")))
 
     assert provider.provider_name == "deepseek"
-    assert provider.model == "deepseek-chat"
+    assert provider.model == "deepseek-flash"
 
 
 # --- Claude ---
