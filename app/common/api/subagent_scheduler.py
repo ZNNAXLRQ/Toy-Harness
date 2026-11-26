@@ -2,8 +2,10 @@
 
 三条边界，避免子代理变成「第二个不受控的主循环」：
 
-1. **工具白名单**：子代理只能拿到 ``allowed_tools``，默认只读；写操作要么禁止，
-   要么仍然走同一个 ``ApprovalService``（禁止子代理自我批准）。
+1. **只读工具集**：子代理只能拿到 ``read_file`` / ``list_files``。写/执行类工具
+   **不能**通过配置打开——子代理没有审批通道，放开写工具就等于无审批写入。
+   将来若要允许敏感工具，必须给调度器注入真正的 ``ApprovalService``，为子代理的
+   每次调用新建审批记录，并禁止它消费父会话的批准（审批按 call 记录，不能跨调用复用）。
 2. **深度限制**：``max_depth`` 防止子代理再生成子代理形成递归炸弹。
 3. **预算独立**：子代理有自己的 token 预算，用尽即失败并回报，不能无限制消耗
    父会话的额度。
@@ -106,9 +108,9 @@ class SubagentScheduler(Protocol):
     async def spawn(self, task: SubagentTask) -> SubagentResult:
         """执行一个子任务并等它结束；超并发/深度限制抛 ``SubagentError``。
 
-        实现需要：``LLMProvider``、只读的 ``ToolRegistry`` 视图、``ApprovalService``
-        （仍需人工批准敏感操作）以及 ``SubagentRunStore``（先落运行记录再执行，
-        结束后更新状态；崩溃时把它留在 unknowns 里由人工处理）。
+        实现需要：``LLMProvider``、**只读的** ``ToolRegistry`` 视图、``SubagentRunStore``。
+        实现自身不做审批：敏感工具不允许出现在子代理工具集里；先落运行记录再执行，
+        结束后更新状态。崩溃遗留的 ``running`` 由 ``recover_unknown`` 处理。
         """
         ...
 
@@ -119,9 +121,17 @@ class SubagentScheduler(Protocol):
     async def cancel(self, run_id: str) -> None:
         """请求取消一个运行。
 
-        语义：``cancel`` 只置取消标志并把 run 记为 ``cancelled``（若尚未终态）；
-        正在等待的 ``spawn`` 以 ``SubagentResult(status="cancelled")`` **正常返回**
-        （不抛 ``asyncio.CancelledError``），便于父循环把结果写回父会话。
-        已终态的 run 调 ``cancel`` 是空操作。
+        语义：正在执行（本进程持有）的 run 会被取消，``spawn`` 以
+        ``SubagentResult(status="cancelled")`` **正常返回**（不抛 ``CancelledError``）；
+        未终态的遗留 ``running`` 行（非本进程持有）标记为 ``cancelled``；
+        已终态的 run 调 ``cancel`` 是空操作；不存在的 run 抛 ``NotFoundError``。
+        """
+        ...
+
+    async def recover_unknown(self, session_id: str) -> int:
+        """把该会话崩溃遗留的 ``running`` 行判为 ``unknown``，返回处理条数。
+
+        实现必须**跳过当前进程里仍在执行的 run**；已终态的行不动；不重试（子代理可能
+        已有外部副作用）。D 在启动/重连恢复时对每个 open 会话调用一次即可。
         """
         ...

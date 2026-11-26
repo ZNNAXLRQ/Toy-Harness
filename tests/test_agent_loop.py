@@ -815,3 +815,48 @@ async def test_incomplete_response_emits_no_model_response_event():
     assert [e for e in harness.events.events if str(e.type) == "model_response"] == []
     failed = [e for e in harness.events.events if str(e.type) == "turn_failed"][0]
     assert failed.seq == 1  # 只有 user 消息
+
+async def test_model_response_is_published_only_after_persisting():
+    """事件流只反映已落库消息：收到 model_response 时库里必须已有该 assistant 消息。"""
+    class CheckingPublisher(RecordingEventPublisher):
+        def __init__(self):
+            super().__init__()
+            self.state = None
+
+        async def publish(self, event):
+            if self.state is not None and str(event.type) == "model_response":
+                messages = await self.state.list_messages(event.session_id)
+                assert any(
+                    message.role == "assistant" and message.seq == event.seq
+                    for message in messages
+                ), "model_response 发出时 assistant 消息尚未落库"
+            await super().publish(event)
+
+    publisher = CheckingPublisher()
+    harness = Harness([response(call("read", "read_file", {})), response(content="done")], events=publisher)
+    publisher.state = harness.state
+    harness.tools.add("read_file", lambda arguments: "content")
+    session = await harness.session()
+
+    outcome = await harness.loop.run_turn(session.id, user_content="go")
+
+    assert outcome.status == TurnStatus.COMPLETED
+
+
+async def test_tool_skipped_and_turn_failed_carry_sequence():
+    calls = [call("w1", "write_file", {}), call("w2", "write_file", {})]
+    harness = Harness([response(*calls)], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="write two")
+    approval = await harness.state.get_approval_for_call("w1")
+    await harness.approval.decide(approval.id, ApprovalDecision.DENIED, actor="teacher")
+
+    await harness.loop.resume_turn(session.id, approval_id=approval.id)
+
+    skipped = [e for e in harness.events.events if str(e.type) == "tool_skipped"]
+    failed = [e for e in harness.events.events if str(e.type) == "turn_failed"]
+    assert skipped and skipped[0].seq == 2  # 发起调用的 assistant 消息
+    assert failed and failed[0].seq == max(
+        message.seq for message in await harness.state.list_messages(session.id)
+    )

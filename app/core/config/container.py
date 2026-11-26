@@ -196,9 +196,9 @@ def _missing(name: str, who: str, entry: str, reason: str) -> ConfigError:
 
 
 def _probe(name: str, who: str, entry: str, loader: Callable[[], Any]) -> Any:
-    """把「未交付」和「交付了但构造失败」都翻译成点名 ConfigError。"""
+    """把「未交付」「交付了但构造失败」「返回 None」都翻译成点名 ConfigError。"""
     try:
-        return loader()
+        value = loader()
     except ImportError as error:
         raise _missing(name, who, entry, f"尚未交付（{error}）") from error
     except ConfigError:
@@ -207,6 +207,9 @@ def _probe(name: str, who: str, entry: str, loader: Callable[[], Any]) -> Any:
         raise _missing(
             name, who, entry, f"构造时出错：{type(error).__name__}: {error}"
         ) from error
+    if value is None:
+        raise _missing(name, who, entry, "构造返回 None（实现未正确装配）")
+    return value
 
 
 # 下面这些函数是**可被测试替换**的探测点（tests/test_container.py 用 monkeypatch 模拟

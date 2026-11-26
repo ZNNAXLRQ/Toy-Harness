@@ -50,5 +50,7 @@
 - `config/config.yaml` 已按 provider profile 写好，新增 `workspace` / `agent` /
   `subagent` 三个 section；拼错键会直接报错（`extra="forbid"`，环境变量段名也有校验）。
 - README / `sample.md` 第三章的配置示例仍是旧格式，需要更新成 profile 形状。
+- 子代理相关 REST：状态以 `subagent_runs` 表为唯一记录；`SubagentScheduler.recover_unknown(session_id)`
+  在启动/重连时调用（跳过本进程活跃 run），取消用 `cancel(run_id)`（终态空操作）。
 - 若最终采用 `MODEL_REQUEST` 事件（B 的 SSE 原型加的），要等 B 的分支合入后由 A 在
   `TurnEngine._model_step` 补发；当前 PR3 还没加，前端先按现有事件渲染。

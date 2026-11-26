@@ -514,3 +514,22 @@ async def test_default_policy_uses_only_the_tools_that_are_registered():
     result = await scheduler.spawn(task())
 
     assert result.status == SubagentRunStatus.SUCCESS.value
+
+async def test_cancel_marks_foreign_running_row_cancelled():
+    """store 里 running 但本进程没有 task（崩溃遗留/别的进程）→ 按端口语义标 cancelled。"""
+    store = MemorySubagentRunStore()
+    await store.save_run("stale-1", "s1")
+    scheduler = DefaultSubagentScheduler(
+        provider=ScriptedProvider([]),
+        tools=FakeToolRegistry(),
+        run_store=store,
+        events=RecordingEventPublisher(),
+    )
+
+    await scheduler.cancel("stale-1")
+
+    stored = await store.load_run("stale-1")
+    assert stored is not None and stored.status == "cancelled"
+    payload = json.loads(stored.result_json)
+    assert payload["status"] == "cancelled"
+    assert payload["summary"]

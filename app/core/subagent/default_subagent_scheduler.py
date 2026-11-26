@@ -182,7 +182,7 @@ class DefaultSubagentScheduler:
         ]
 
     async def cancel(self, run_id: str) -> None:
-        """取消正在执行的 run；已终态/未知的 run 是空操作（不存在才抛 NotFound）。"""
+        """取消正在执行的 run；终态/未知 run 空操作；遗留 running 行标记 cancelled。"""
         task = self._running.get(run_id)
         if task is not None:
             task.cancel()
@@ -191,6 +191,21 @@ class DefaultSubagentScheduler:
         row = await self.run_store.load_run(run_id)
         if row is None:
             raise NotFoundError(f"subagent run {run_id} not found")
+        if row.status == SubagentRunStatus.RUNNING.value:
+            # 非本进程持有（崩溃遗留或别的进程在跑）：本进程无法真正打断它，按端口语义
+            # 标记 cancelled；若另一个进程还活着，它结束时可能再写一次终态（无 store CAS，
+            # 课程范围接受，恢复入口 recover_unknown 会兜底）。
+            await self.run_store.update_run(
+                row.id,
+                status=SubagentRunStatus.CANCELLED.value,
+                result_json=result_json(
+                    SubagentResult(
+                        run_id=row.id,
+                        status=SubagentRunStatus.CANCELLED.value,
+                        summary="cancelled without a live task in this process",
+                    )
+                ),
+            )
         return
 
     async def recover_unknown(self, session_id: str) -> int:

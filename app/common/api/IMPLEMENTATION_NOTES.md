@@ -147,6 +147,11 @@ uv run pytest tests/contracts -q
   探测实现时把「未交付」和「构造失败」都翻译成点名 `ConfigError`）、
   事件 `seq` 对齐 `messages.seq`（见 `AgentEvent` docstring 的 seq 语义）。
 
+**子代理恢复与取消（D 接 Web 需要）**：`SubagentScheduler` 协议已含
+`recover_unknown(session_id)`（启动/重连时对每个 open 会话调用一次，跳过本进程活跃
+run）；`cancel(run_id)` 对终态 run 是空操作、对遗留 `running` 行标记 `cancelled`。
+子代理状态以 `subagent_runs` 为唯一记录，REST 直接查这个表。
+
 **事件 seq 约定**：`seq` 是消息锚点而非事件 id，同一消息的多个事件同 seq；
 `seq=0` 表示不锚定持久化消息（子代理事件）；不完整模型响应不落库、也不发
 `model_response`。
