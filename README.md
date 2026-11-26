@@ -13,20 +13,18 @@ uv sync          # 创建 .venv，按 uv.lock 安装运行依赖与开发依赖
 
 `uv run` 会自动使用 `.venv`，不需要手动激活。
 
-## Web 实时演示
+## Web SSE 接口
 
-在仓库根目录启动本地服务，然后打开 [Toy Harness](http://127.0.0.1:8080/)。
+在仓库根目录启动接口服务。
 
 ```powershell
 uv run uvicorn app.web.server:app --host 127.0.0.1 --port 8080
 ```
 
-默认使用固定的离线示例。在中间对话区点击「发送」，右侧时间线会随 SSE 事件显示模型请求、工具选择、审批、工具执行和本轮结果。展开工具条目可查看参数及结果。
-
-左侧「新建会话」可以清空对话和时间线并开始下一轮，「会话记录」保留本页已经提交的任务摘要。「审计日志」显示本轮实际收到的审批和工具事件。
-
-- **需要审批**会自动读取文件，在执行 `write_file` 前等待明确的批准。拒绝后结束本轮。
-- **全权限**会直接执行网页开放的三种工具 `read_file`、`list_files` 和 `write_file`。
+- `GET /api/config` 返回当前模型提供方和离线测试任务。
+- `POST /api/runs` 接收 `prompt` 和 `mode`，返回 `run_id`。权限模式为 `approval` 或 `full`。
+- `GET /api/runs/{run_id}/events` 返回 SSE 事件流。
+- `POST /api/runs/{run_id}/approvals/{approval_id}` 接收 `decision`，值为 `approved` 或 `denied`。
 
 每次运行使用独立的临时工作区，初始文件是 `notes.txt`。会话与审批历史随服务退出清除。
 
