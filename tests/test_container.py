@@ -110,8 +110,21 @@ async def test_provider_factory_is_injectable():
     assert calls == [1]
 
 
-def test_default_components_names_the_missing_implementations():
-    """B/C/D 还没交付时必须点名到人，而不是抛一个裸 ImportError。"""
+def test_default_components_aggregates_missing_components(monkeypatch):
+    """缺多个组件时汇总成一条点名到人的 ConfigError，而不是裸 ImportError。"""
+    import app.core.config.container as container_module
+
+    def missing(*args, **kwargs):
+        raise ImportError("not delivered")
+
+    for name in (
+        "_load_state_stores",
+        "_load_context",
+        "_load_tools",
+        "_load_events",
+    ):
+        monkeypatch.setattr(container_module, name, missing)
+
     with pytest.raises(ConfigError) as caught:
         default_components(HarnessSettings())
 
@@ -119,7 +132,64 @@ def test_default_components_names_the_missing_implementations():
     assert "app.state.persistence.factory" in message  # C
     assert "create_async_builtin_registry" in message  # B
     assert "SseEventPublisher" in message  # D
-    assert caught.value.detail["missing"]
+    missing = caught.value.detail["missing"]
+    assert {item["owner"] for item in missing} == {"B", "C", "D"}
+    assert len(missing) == 4  # state+subagent / context / tools / events
+
+
+def test_default_components_wraps_construction_errors(monkeypatch):
+    """交付了但构造失败（例如 workspace 不存在）也要翻译成点名 ConfigError。"""
+    import app.core.config.container as container_module
+
+    def missing(*args, **kwargs):
+        raise ImportError("not delivered")
+
+    for name in ("_load_state_stores", "_load_context", "_load_events"):
+        monkeypatch.setattr(container_module, name, missing)
+
+    def broken_tools(settings):
+        raise FileNotFoundError("workspace directory is missing")
+
+    monkeypatch.setattr(container_module, "_load_tools", broken_tools)
+
+    with pytest.raises(ConfigError) as caught:
+        default_components(HarnessSettings())
+
+    message = caught.value.message
+    assert "ToolRegistry" in message
+    assert "FileNotFoundError" in message
+    assert "workspace directory is missing" in message
+
+
+async def test_default_components_assembles_when_all_probes_succeed(monkeypatch):
+    import app.core.config.container as container_module
+
+    state = MemoryStateStore()
+    subagent_store = MemorySubagentRunStore()
+    tools = FakeToolRegistry()
+    tools.add("read_file", lambda arguments: "content")
+    events = RecordingEventPublisher()
+
+    monkeypatch.setattr(container_module, "_load_state_stores", lambda settings: (state, subagent_store))
+    monkeypatch.setattr(container_module, "_load_context", lambda settings: PassThroughContext())
+    monkeypatch.setattr(container_module, "_load_tools", lambda settings: tools)
+    monkeypatch.setattr(container_module, "_load_approval", lambda store: FakeApprovalService(store))
+    monkeypatch.setattr(container_module, "_load_audit", lambda store: MemoryAuditService(store))
+    monkeypatch.setattr(container_module, "_load_events", lambda: events)
+    monkeypatch.setattr(container_module, "_load_agents", lambda: None)
+
+    components = default_components(HarnessSettings())
+    provider = _scripted([ModelResponse(content="wired")])
+    container = build_container(HarnessSettings(), components, provider=provider)
+    session = await state.create_session()
+
+    outcome = await container.loop.run_turn(session.id, user_content="hi")
+
+    assert components.state is state
+    assert components.events is events
+    assert outcome.content == "wired"
+
+
 
 
 class _ScriptedProvider:

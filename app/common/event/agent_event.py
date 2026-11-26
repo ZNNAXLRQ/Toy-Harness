@@ -4,6 +4,15 @@
 ``approvals``。因此事件可以丢、可以重发，客户端断线后拉 REST 即可对齐。
 ``seq`` 取对应的 ``messages.seq``，让前端能把一条事件钉在会话时间线的正确位置。
 
+``seq`` 的准确语义（D 必须按这个理解，不要当事件 id 用）：
+
+- **它是"消息锚点"，不是事件唯一 id**：一条消息可能对应多个事件（例如 assistant
+  消息 → ``model_response`` + ``tool_start``/``tool_end``），这些事件的 ``seq`` 相同；
+- ``seq=0`` 表示**不锚定任何持久化消息**（如子代理的 ``subagent_started/finished``，
+  子代理 transcript 不落主会话）；
+- 事件流只反映已持久化的消息：模型响应不完整（``length``/``content_filter``）时
+  不落 assistant 消息，也就不发 ``model_response``，只发 ``turn_failed``。
+
 两个强制保证：
 
 1. **构造即校验**：payload 的键必须在 ``PAYLOAD_FIELDS[type]`` 内、必填键必须在

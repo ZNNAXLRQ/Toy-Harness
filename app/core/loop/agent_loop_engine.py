@@ -329,19 +329,8 @@ class TurnEngine:
         self.context.record_usage(response.tokens)
 
         if response.finish_reason in {"length", "content_filter"}:
-            # 不完整响应不落库；事件仍发一条（seq 指向当前最后一条消息）便于排查。
-            await self.publish(
-                EventType.MODEL_RESPONSE,
-                session_id,
-                seq=await self.state.latest_message_seq(session_id),
-                iteration=progress.iteration,
-                content=response.content or "",
-                finish_reason=response.finish_reason or "",
-                tool_calls=[
-                    {"id": call.id, "name": call.name, "arguments": call.arguments}
-                    for call in response.tool_calls
-                ],
-            )
+            # 不完整响应不落库，也就不发 model_response 事件：事件流只反映已持久化的
+            # 消息，否则前端会按 seq 渲染出一条 REST 里不存在的 assistant 消息。
             return await self._fail(session_id, progress, "Incomplete model response")
 
         try:

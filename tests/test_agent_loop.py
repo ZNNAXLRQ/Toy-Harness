@@ -765,3 +765,53 @@ async def test_events_carry_message_seq_for_timeline():
     assert by_kind["tool_start"] == [2]
     assert by_kind["tool_end"] == [2]
     assert by_kind["turn_completed"] == [4]
+
+# --- PR3 复审修复：seq 边界路径 ---
+
+
+async def test_approval_events_carry_the_calling_message_seq():
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="write")
+    approval = await harness.state.get_approval_for_call("write")
+    await harness.approval.decide(approval.id, ApprovalDecision.APPROVED, actor="teacher")
+
+    await harness.loop.resume_turn(session.id, approval_id=approval.id)
+
+    required = [e for e in harness.events.events if str(e.type) == "approval_required"][0]
+    decided = [e for e in harness.events.events if str(e.type) == "approval_decided"][0]
+    assistant_seq = (await harness.state.list_messages(session.id))[1].seq
+    assert required.seq == assistant_seq == 2
+    assert decided.seq == assistant_seq
+
+
+async def test_denial_events_carry_sequence():
+    harness = Harness([response(call("write", "write_file", {}))], sensitive={"write_file"})
+    harness.tools.add("write_file", lambda arguments: {"written": True})
+    session = await harness.session()
+    await harness.loop.run_turn(session.id, user_content="write")
+    approval = await harness.state.get_approval_for_call("write")
+    await harness.approval.decide(approval.id, ApprovalDecision.DENIED, actor="teacher")
+
+    await harness.loop.resume_turn(session.id, approval_id=approval.id)
+
+    messages = await harness.state.list_messages(session.id)
+    latest_seq = max(message.seq for message in messages)
+    decided = [e for e in harness.events.events if str(e.type) == "approval_decided"][0]
+    failed = [e for e in harness.events.events if str(e.type) == "turn_failed"][0]
+    assert decided.seq == 2  # 发起调用的 assistant 消息
+    assert failed.seq == latest_seq  # 最新消息（被拒绝调用的 tool 消息）
+
+
+async def test_incomplete_response_emits_no_model_response_event():
+    """不落库的响应不发 model_response：事件流只反映已持久化消息。"""
+    harness = Harness([response(call("read", "read_file", {}), finish_reason="length")])
+
+    session = await harness.session()
+    outcome = await harness.loop.run_turn(session.id, user_content="go")
+
+    assert outcome.status == TurnStatus.FAILED
+    assert [e for e in harness.events.events if str(e.type) == "model_response"] == []
+    failed = [e for e in harness.events.events if str(e.type) == "turn_failed"][0]
+    assert failed.seq == 1  # 只有 user 消息

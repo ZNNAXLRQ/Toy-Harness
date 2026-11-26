@@ -126,17 +126,20 @@ class DefaultSubagentScheduler:
                     ensure_ascii=False,
                 ),
             )
-            self._running[view.id] = asyncio.current_task()  # type: ignore[assignment]
-            await self._publish(
-                EventType.SUBAGENT_STARTED,
-                task.parent_session_id,
-                run_id=view.id,
-                task_id=task.id,
-                prompt=task.prompt,
-            )
+            result: SubagentResult | None = None
             try:
+                self._running[view.id] = asyncio.current_task()  # type: ignore[assignment]
+                await self._publish(
+                    EventType.SUBAGENT_STARTED,
+                    task.parent_session_id,
+                    run_id=view.id,
+                    task_id=task.id,
+                    prompt=task.prompt,
+                )
                 result = await self._run(task, scoped, view.id)
             except asyncio.CancelledError:
+                # 取消可能发生在 started 事件发布期间：必须在这里收敛，否则 store 行
+                # 会永久停在 running（只能靠 recover_unknown 事后清理）。
                 result = SubagentResult(
                     run_id=view.id,
                     status=SubagentRunStatus.CANCELLED.value,
@@ -150,18 +153,23 @@ class DefaultSubagentScheduler:
                 )
             finally:
                 self._running.pop(view.id, None)
-
-            await self.run_store.update_run(
-                view.id, status=result.status, result_json=result_json(result)
-            )
-            await self._publish(
-                EventType.SUBAGENT_FINISHED,
-                task.parent_session_id,
-                run_id=view.id,
-                status=result.status,
-                summary=result.summary,
-                tokens=result.tokens,
-            )
+                if result is None:  # 兜底：CancelledError 之外的 BaseException 路径
+                    result = SubagentResult(
+                        run_id=view.id,
+                        status=SubagentRunStatus.FAILED.value,
+                        summary="subagent finished without a result",
+                    )
+                await self.run_store.update_run(
+                    view.id, status=result.status, result_json=result_json(result)
+                )
+                await self._publish(
+                    EventType.SUBAGENT_FINISHED,
+                    task.parent_session_id,
+                    run_id=view.id,
+                    status=result.status,
+                    summary=result.summary,
+                    tokens=result.tokens,
+                )
             return result
 
     async def running(self, session_id: str) -> Sequence[SubagentRunView]:
@@ -174,26 +182,40 @@ class DefaultSubagentScheduler:
         ]
 
     async def cancel(self, run_id: str) -> None:
+        """取消正在执行的 run；已终态/未知的 run 是空操作（不存在才抛 NotFound）。"""
         task = self._running.get(run_id)
-        if task is None:
-            raise NotFoundError(f"subagent run {run_id} is not running")
-        task.cancel()
-        await asyncio.sleep(0)  # 让取消有机会在本轮内展开（spawn 负责收尾与落库）
+        if task is not None:
+            task.cancel()
+            await asyncio.sleep(0)  # 让取消在本轮内展开（spawn 负责收尾与落库）
+            return
+        row = await self.run_store.load_run(run_id)
+        if row is None:
+            raise NotFoundError(f"subagent run {run_id} not found")
+        return
 
     async def recover_unknown(self, session_id: str) -> int:
-        """把崩溃遗留的 ``running`` 行判为 ``unknown``（不重试），返回条数。"""
+        """把崩溃遗留的 ``running`` 行判为 ``unknown``（不重试），返回条数。
+
+        **跳过本进程里仍在执行的 run**：D 在重连/启动时调用它，不能把活跃子代理误判。
+        """
         count = 0
         for row in await self.run_store.list_runs(session_id):
-            if row.status == SubagentRunStatus.RUNNING.value:
-                await self.run_store.update_run(
-                    row.id,
-                    status=SubagentRunStatus.UNKNOWN.value,
-                    result_json=json.dumps(
-                        {"status": SubagentRunStatus.UNKNOWN.value, "summary": "stale running row"},
-                        ensure_ascii=False,
-                    ),
-                )
-                count += 1
+            if row.status != SubagentRunStatus.RUNNING.value:
+                continue
+            if row.id in self._running:
+                continue
+            await self.run_store.update_run(
+                row.id,
+                status=SubagentRunStatus.UNKNOWN.value,
+                result_json=result_json(
+                    SubagentResult(
+                        run_id=row.id,
+                        status=SubagentRunStatus.UNKNOWN.value,
+                        summary="stale running row",
+                    )
+                ),
+            )
+            count += 1
         return count
 
     # --------------------------------------------------------------- internal

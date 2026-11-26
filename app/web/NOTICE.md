@@ -8,6 +8,11 @@
 3. `app/common/event/event_type.py`：事件类型 + payload 白名单/必填键；
    `AgentEvent` 构造时校验 + 自动脱敏，直接 `event.to_sse()` 推；`seq` 对应 `messages.seq`。
 
+> **`EventType.seq` 语义**：事件 `seq` = 它锚定的 `messages.seq`，**不是事件唯一 id**
+> （同一条 assistant 消息的 `model_response`/`tool_start`/`tool_end` 同 seq）；`seq=0`
+> 表示不锚定持久化消息（子代理 `subagent_started/finished`）。不完整模型响应不落库，
+> 因此不发 `model_response`，只发 `turn_failed`——SSE 的 `id:` 请自己生成，别直接用 seq。
+>
 > **PR2 已删除旧执行链**（`app.core.agent` / `app.core.provider` / `app.main`）。
 > `origin/web` 上基于旧 `Agent` 的 `app/web/runtime.py|api.py` **合并后会 import 失败**，
 > 必须先迁移到 `AgentLoop` + `provider_factory` + `AgentEvent`（对照表见

@@ -140,14 +140,23 @@ uv run pytest tests/contracts -q
 - **PR2**：`TurnEngine`（模型↔工具状态机、审批挂起/恢复、拒绝终止、UNKNOWN 恢复、
   事件 best-effort、prefix 稳定、迭代预算）、`DefaultAgentLoop`（会话锁/abandon）、
   `TurnProgress`；OpenAI/DeepSeek/Claude 适配器 + `provider_factory`；
-- **PR3**：`DefaultSubagentScheduler`（只读白名单/深度/并发/预算/取消/崩溃恢复、
-  运行记录、事件）、`SubagentContext`、`DelegationPolicy`、结果回流文本；
-  `container.py`（`Components`/`build_container`/`default_components`/`build_default_container`）、
-  事件 `seq` 对齐 `messages.seq`。
+- **PR3**：`DefaultSubagentScheduler`（深度/并发/预算/取消/崩溃恢复、运行记录、事件）、
+  `SubagentContext`、`DelegationPolicy`（**子代理只读是硬边界**：`allowed_tools` 只能是
+  `read_file`/`list_files`，写工具不能通过配置打开）、结果回流文本（按序列化后长度有界）；
+  `container.py`（`Components`/`build_container`/`default_components`/`build_default_container`，
+  探测实现时把「未交付」和「构造失败」都翻译成点名 `ConfigError`）、
+  事件 `seq` 对齐 `messages.seq`（见 `AgentEvent` docstring 的 seq 语义）。
+
+**事件 seq 约定**：`seq` 是消息锚点而非事件 id，同一消息的多个事件同 seq；
+`seq=0` 表示不锚定持久化消息（子代理事件）；不完整模型响应不落库、也不发
+`model_response`。
 
 **已知限制（写进答辩要能解释）**：
 
 - 子代理 transcript 不落库（schema 无 parent 列），落库的只有 `subagent_runs` 的
-  brief/结果；崩溃遗留 `running` 由 `recover_unknown(session_id)` 判 `unknown`，不重试；
+  brief/结果；崩溃遗留 `running` 由 `recover_unknown(session_id)` 判 `unknown`，不重试，
+  且**跳过本进程仍在执行的 run**（D 在重连恢复时按会话调用）；
+- 子代理不能执行写工具（无审批通道）；将来要开放写操作，必须注入真正的
+  `ApprovalService` 并为子代理的每次调用新建审批记录，禁止复用父会话的批准；
 - `token` 与 `reasoning_content` 不持久化（schema 无列）；
 - `Checkpoint.state_json` 写入通道、`ToolResult` denied/skipped 拆分等留待后续清理 PR。

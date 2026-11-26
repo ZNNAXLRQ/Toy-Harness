@@ -25,7 +25,7 @@
 
 import asyncio
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from app.common.api.agents_md_loader import AgentsMdLoader
 from app.common.api.approval_service import ApprovalService
@@ -174,118 +174,135 @@ def build_container(
 
 
 # ---------------------------------------------------------------------------
-# 默认组件探测：把「谁还没交付」说清楚，而不是给一个 ImportError 堆栈
+# 默认组件探测：把「谁还没交付 / 哪一步装配失败」说清楚，而不是给一个裸异常
 # ---------------------------------------------------------------------------
 
+STATE_STORES_ENTRY = (
+    "app.state.persistence.factory.create_stores(settings) -> (state, subagent_run_store)"
+)
+CONTEXT_ENTRY = "app.state.context.factory.create_context_manager(settings)"
+TOOLS_ENTRY = "app.tools.registry.create_async_builtin_registry(workspace) -> ToolRegistry"
+APPROVAL_ENTRY = "app.tools.approval.DefaultApprovalService(state)"
+AUDIT_ENTRY = "app.tools.audit.DefaultAuditService(state)"
+EVENTS_ENTRY = "app.web.sse.sse_event_publisher.SseEventPublisher()"
+AGENTS_ENTRY = "app.state.agents.default_agents_md_loader.DefaultAgentsMdLoader()"
 
-def _missing(name: str, who: str, entry: str) -> ConfigError:
+
+def _missing(name: str, who: str, entry: str, reason: str) -> ConfigError:
     return ConfigError(
-        f"{name} 实现尚未交付（{who}）：需要 {entry}",
-        detail={"component": name, "owner": who, "expected": entry},
+        f"{name} 装配失败（{who}）：{reason}；需要 {entry}",
+        detail={"component": name, "owner": who, "expected": entry, "reason": reason},
     )
+
+
+def _probe(name: str, who: str, entry: str, loader: Callable[[], Any]) -> Any:
+    """把「未交付」和「交付了但构造失败」都翻译成点名 ConfigError。"""
+    try:
+        return loader()
+    except ImportError as error:
+        raise _missing(name, who, entry, f"尚未交付（{error}）") from error
+    except ConfigError:
+        raise
+    except Exception as error:  # noqa: BLE001 - 构造期任何异常都要可读
+        raise _missing(
+            name, who, entry, f"构造时出错：{type(error).__name__}: {error}"
+        ) from error
+
+
+# 下面这些函数是**可被测试替换**的探测点（tests/test_container.py 用 monkeypatch 模拟
+# 缺 C / 缺 B / 缺 D，而不是假设"当前全部未交付"）。
+def _load_state_stores(settings: HarnessSettings) -> tuple[StateStore, SubagentRunStore]:
+    from app.state.persistence.factory import create_stores  # type: ignore[import-not-found]
+
+    return create_stores(settings)
+
+
+def _load_context(settings: HarnessSettings) -> ContextManager:
+    from app.state.context.factory import create_context_manager  # type: ignore[import-not-found]
+
+    return create_context_manager(settings)
+
+
+def _load_tools(settings: HarnessSettings) -> ToolRegistry:
+    from app.tools.registry import create_async_builtin_registry  # type: ignore[attr-defined]
+
+    return create_async_builtin_registry(settings.workspace_path())
+
+
+def _load_approval(state: StateStore) -> ApprovalService:
+    from app.tools.approval import DefaultApprovalService  # type: ignore[attr-defined]
+
+    return DefaultApprovalService(state)
+
+
+def _load_audit(state: StateStore) -> AuditService:
+    from app.tools.audit import DefaultAuditService  # type: ignore[attr-defined]
+
+    return DefaultAuditService(state)
+
+
+def _load_events() -> EventPublisher:
+    from app.web.sse.sse_event_publisher import SseEventPublisher  # type: ignore[import-not-found]
+
+    return SseEventPublisher()
+
+
+def _load_agents() -> AgentsMdLoader:
+    from app.state.agents.default_agents_md_loader import (  # type: ignore[import-not-found]
+        DefaultAgentsMdLoader,
+    )
+
+    return DefaultAgentsMdLoader()
 
 
 def default_components(settings: HarnessSettings) -> Components:
     """按约定入口探测实现；缺任何必需组件都汇总成一条 ``ConfigError``。"""
-    missing: list[ConfigError] = []
+    errors: list[ConfigError] = []
 
-    state: StateStore | None = None
-    subagent_run_store: SubagentRunStore | None = None
-    try:
-        from app.state.persistence.factory import create_stores  # type: ignore[import-not-found]
-
-        state, subagent_run_store = create_stores(settings)
-    except ImportError:
-        missing.append(
-            _missing(
-                "StateStore + SubagentRunStore",
-                "C",
-                "app.state.persistence.factory.create_stores(settings) -> (state, subagent_run_store)",
-            )
-        )
-
-    context: ContextManager | None = None
-    try:
-        from app.state.context.factory import create_context_manager  # type: ignore[import-not-found]
-
-        context = create_context_manager(settings)
-    except ImportError:
-        missing.append(
-            _missing(
-                "ContextManager",
-                "C",
-                "app.state.context.factory.create_context_manager(settings)",
-            )
-        )
-
-    tools: ToolRegistry | None = None
-    try:
-        from app.tools.registry import create_async_builtin_registry  # type: ignore[attr-defined]
-
-        tools = create_async_builtin_registry(settings.workspace_path())
-    except ImportError:
-        missing.append(
-            _missing(
-                "ToolRegistry",
-                "B",
-                "app.tools.registry.create_async_builtin_registry(workspace) -> ToolRegistry",
-            )
-        )
-
-    approval: ApprovalService | None = None
-    audit: AuditService | None = None
-    if state is not None:
+    def attempt(name: str, who: str, entry: str, loader: Callable[[], Any]) -> Any:
         try:
-            from app.tools.approval import DefaultApprovalService  # type: ignore[attr-defined]
+            return _probe(name, who, entry, loader)
+        except ConfigError as error:
+            errors.append(error)
+            return None
 
-            approval = DefaultApprovalService(state)
-        except ImportError:
-            missing.append(
-                _missing("ApprovalService", "B", "app.tools.approval.DefaultApprovalService(state)")
-            )
-        try:
-            from app.tools.audit import DefaultAuditService  # type: ignore[attr-defined]
+    stores = attempt(
+        "StateStore + SubagentRunStore",
+        "C",
+        STATE_STORES_ENTRY,
+        lambda: _load_state_stores(settings),
+    )
+    context = attempt(
+        "ContextManager", "C", CONTEXT_ENTRY, lambda: _load_context(settings)
+    )
+    tools = attempt("ToolRegistry", "B", TOOLS_ENTRY, lambda: _load_tools(settings))
+    events = attempt("EventPublisher", "D", EVENTS_ENTRY, _load_events)
 
-            audit = DefaultAuditService(state)
-        except ImportError:
-            missing.append(
-                _missing("AuditService", "B", "app.tools.audit.DefaultAuditService(state)")
-            )
-
-    events: EventPublisher | None = None
-    try:
-        from app.web.sse.sse_event_publisher import SseEventPublisher  # type: ignore[import-not-found]
-
-        events = SseEventPublisher()
-    except ImportError:
-        missing.append(
-            _missing(
-                "EventPublisher",
-                "D",
-                "app.web.sse.sse_event_publisher.SseEventPublisher()",
-            )
+    approval = audit = None
+    if stores is not None:
+        state, subagent_run_store = stores
+        approval = attempt(
+            "ApprovalService", "B", APPROVAL_ENTRY, lambda: _load_approval(state)
         )
+        audit = attempt("AuditService", "B", AUDIT_ENTRY, lambda: _load_audit(state))
 
-    agents: AgentsMdLoader | None = None
+    # AGENTS.md 加载器是可选组件：没有它 loop 只是不读 AGENTS.md。
+    agents = None
     try:
-        from app.state.agents.default_agents_md_loader import (  # type: ignore[import-not-found]
-            DefaultAgentsMdLoader,
-        )
+        agents = _load_agents()
+    except Exception:  # noqa: BLE001 - 可选组件，未交付/构造失败都退化为 None
+        agents = None
 
-        agents = DefaultAgentsMdLoader()
-    except ImportError:
-        agents = None  # 可选组件：没有 AGENTS.md 加载器也能跑
-
-    if missing:
+    if errors:
         raise ConfigError(
-            "容器无法装配：以下实现尚未交付 —— "
-            + "；".join(error.message for error in missing),
-            detail={"missing": [error.detail for error in missing]},
+            "容器无法装配：以下实现未就绪 —— " + "；".join(error.message for error in errors),
+            detail={"missing": [error.detail for error in errors]},
         )
 
-    assert state is not None and subagent_run_store is not None
-    assert context is not None and tools is not None
-    assert approval is not None and events is not None
+    assert stores is not None and context is not None
+    assert tools is not None and events is not None
+    assert approval is not None
+    state, subagent_run_store = stores
     return Components(
         state=state,
         subagent_run_store=subagent_run_store,
