@@ -738,3 +738,30 @@ async def test_dispatch_claim_conflict_propagates_without_failing_session():
 
     assert (await state.load_session(session.id)).status == SessionStatus.OPEN.value
     assert not any(str(event.type) == "turn_failed" for event in events.events)
+
+# --- PR3：事件 seq 与消息时间线 ---
+
+
+async def test_events_carry_message_seq_for_timeline():
+    """事件 seq 必须对得上 messages.seq，前端时间线才不会错位。"""
+    harness = Harness(
+        [response(call("read", "read_file", {})), response(content="done")]
+    )
+    harness.tools.add("read_file", lambda arguments: "content")
+    session = await harness.session()
+
+    await harness.loop.run_turn(session.id, user_content="hello")
+
+    messages = await harness.state.list_messages(session.id)
+    seq_by_role = [(message.role, message.seq) for message in messages]
+    # user=1, assistant(带工具调用)=2, tool=3, assistant(最终)=4
+    assert seq_by_role[1][1] == 2 and seq_by_role[3][1] == 4
+
+    by_kind: dict[str, list[int]] = {}
+    for event in harness.events.events:
+        by_kind.setdefault(str(event.type), []).append(event.seq)
+    assert by_kind["user_message"] == [1]
+    assert by_kind["model_response"] == [2, 4]
+    assert by_kind["tool_start"] == [2]
+    assert by_kind["tool_end"] == [2]
+    assert by_kind["turn_completed"] == [4]
