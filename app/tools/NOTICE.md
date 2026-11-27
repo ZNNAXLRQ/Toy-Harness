@@ -32,3 +32,15 @@ A 的 loop 已经改成只认 `common/api` 的**异步**端口。现有 `app/too
   `success`/`error`；
 - 回滚补偿集合按**消息序号**算：检查点 seq 之后落库的 `role='tool'` 消息对应的调用，
   再过滤 `reversible`；**不要用 `created_at`**（工具调用的时间戳早于检查点，会得到空集）。
+
+## 容器按这些名字探测你的实现（`app/core/config/container.py`）
+
+```python
+from app.tools.registry import create_async_builtin_registry   # (workspace) -> ToolRegistry
+from app.tools.approval import DefaultApprovalService          # (state) -> ApprovalService
+from app.tools.audit import DefaultAuditService                # (state) -> AuditService
+```
+
+你已经提供了这三个（`feat/web-sse` 上），容器会直接装配；**保持这些名字/签名不变**即可。
+迁移完成后删除 `app/common/api/runtime.py` 与 `app/common/model/runtime.py`（现在还被旧
+`ToolRegistry` / `create_builtin_registry` 引用）。

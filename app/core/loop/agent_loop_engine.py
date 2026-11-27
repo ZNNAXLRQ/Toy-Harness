@@ -220,6 +220,7 @@ class TurnEngine:
         await self.publish(
             EventType.APPROVAL_DECIDED,
             session_id,
+            seq=await self._call_message_seq(session_id, turn.pending_call_id),
             approval_id=approval.id,
             call_id=turn.pending_call_id,
             decision=approval.status,
@@ -326,9 +327,22 @@ class TurnEngine:
         )
         progress.record_response(response)
         self.context.record_usage(response.tokens)
+
+        if response.finish_reason in {"length", "content_filter"}:
+            # 不完整响应不落库，也就不发 model_response 事件：事件流只反映已持久化的
+            # 消息，否则前端会按 seq 渲染出一条 REST 里不存在的 assistant 消息。
+            return await self._fail(session_id, progress, "Incomplete model response")
+
+        try:
+            assistant = await self.state.record_assistant_turn(session_id, response)
+        except StateError as error:
+            return await self._fail(session_id, progress, f"StateError: {error.message}")
+
+        # 先落库再发事件：这样 seq 对得上真实消息，前端时间线不会错位。
         await self.publish(
             EventType.MODEL_RESPONSE,
             session_id,
+            seq=assistant.message.seq,
             iteration=progress.iteration,
             content=response.content or "",
             finish_reason=response.finish_reason or "",
@@ -337,14 +351,6 @@ class TurnEngine:
                 for call in response.tool_calls
             ],
         )
-
-        if response.finish_reason in {"length", "content_filter"}:
-            return await self._fail(session_id, progress, "Incomplete model response")
-
-        try:
-            await self.state.record_assistant_turn(session_id, response)
-        except StateError as error:
-            return await self._fail(session_id, progress, f"StateError: {error.message}")
 
         if not response.tool_calls:
             return await self._complete(session_id, progress, response.content)
@@ -421,6 +427,7 @@ class TurnEngine:
                 await self.publish(
                     EventType.APPROVAL_REQUIRED,
                     session_id,
+                    seq=await self._message_seq(session_id, call.message_id),
                     approval_id=approval.id,
                     call_id=call.id,
                     tool_name=call.tool_name,
@@ -454,6 +461,7 @@ class TurnEngine:
         await self.publish(
             EventType.TOOL_START,
             session_id,
+            seq=await self._message_seq(session_id, call.message_id),
             iteration=progress.iteration,
             call_id=call.id,
             name=call.tool_name,
@@ -478,6 +486,7 @@ class TurnEngine:
         await self.publish(
             EventType.TOOL_END,
             session_id,
+            seq=await self._message_seq(session_id, call.message_id),
             call_id=call.id,
             name=call.tool_name,
             status=result.status,
@@ -498,6 +507,7 @@ class TurnEngine:
             await self.publish(
                 EventType.TURN_COMPLETED,
                 session_id,
+                seq=await self.state.latest_message_seq(session_id),
                 iterations=progress.iteration,
                 tokens=progress.tokens,
                 content=final or "",
@@ -516,7 +526,11 @@ class TurnEngine:
         message = redact(error)
         await self._set_status(session_id, SessionStatus.FAILED)
         await self.publish(
-            EventType.TURN_FAILED, session_id, error=message, unknown_calls=[]
+            EventType.TURN_FAILED,
+            session_id,
+            seq=await self.state.latest_message_seq(session_id),
+            error=message,
+            unknown_calls=[],
         )
         return TurnOutcome(
             session_id=session_id,
@@ -536,7 +550,11 @@ class TurnEngine:
             + "; manual confirmation required"
         ) if unknown else "Turn is in a failed state; manual confirmation required"
         await self.publish(
-            EventType.TURN_FAILED, session_id, error=error, unknown_calls=unknown
+            EventType.TURN_FAILED,
+            session_id,
+            seq=await self.state.latest_message_seq(session_id),
+            error=error,
+            unknown_calls=unknown,
         )
         return TurnOutcome(
             session_id=session_id,
@@ -576,13 +594,18 @@ class TurnEngine:
             await self.publish(
                 EventType.TOOL_SKIPPED,
                 session_id,
+                seq=await self._message_seq(session_id, call.message_id),
                 call_id=call.id,
                 name=call.tool_name,
                 reason=skipped.data,
             )
         await self._set_status(session_id, SessionStatus.FAILED)
         await self.publish(
-            EventType.TURN_FAILED, session_id, error="Tool approval denied", unknown_calls=[]
+            EventType.TURN_FAILED,
+            session_id,
+            seq=await self.state.latest_message_seq(session_id),
+            error="Tool approval denied",
+            unknown_calls=[],
         )
         return TurnOutcome(
             session_id=session_id,
@@ -656,6 +679,21 @@ class TurnEngine:
             await self.state.update_session(
                 session_id, prefix_hash=prefix_hash, agents_md_version=version
             )
+
+    async def _message_seq(self, session_id: str, message_id: str | None) -> int:
+        """事件 seq 取对应消息的序号，让前端能把事件钉在会话时间线上。"""
+        if not message_id:
+            return 0
+        for message in await self.state.list_messages(session_id):
+            if message.id == message_id:
+                return message.seq
+        return 0
+
+    async def _call_message_seq(self, session_id: str, call_id: str) -> int:
+        for call in await self.state.list_tool_calls(session_id):
+            if call.id == call_id:
+                return await self._message_seq(session_id, call.message_id)
+        return 0
 
     async def _wire_messages(self, session_id: str) -> list[dict[str, Any]]:
         messages = await self.state.list_messages(session_id)
