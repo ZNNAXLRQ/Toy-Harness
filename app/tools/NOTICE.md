@@ -10,6 +10,15 @@
    - 审计：`record_audit` / `query_audits`（审批决策的审计由 decide_approval 同事务写入，
      `AuditService.log` 不要重复记录）
 
+## 迁移提醒（PR2 之后最重要的一条）
+
+A 的 loop 已经改成只认 `common/api` 的**异步**端口。现有 `app/tools/registry.py` 是
+原型实现（同步、依赖 `app/common/api/runtime.py`），**loop 跑不到它**。你开工时的第一
+件事：把 `ToolRegistry` 实现成异步端口（`async execute` / `get` / `schemas`），
+工具函数保持同步、在**注册表内部**用 `asyncio.to_thread` 包一次；完成后删除
+`app/common/api/runtime.py` 与 `app/common/model/runtime.py`。参考替身：
+`tests/fakes/fake_tools.py`。
+
 ## 你要交付的四个端口
 
 - `Tool`：`async execute`、成功时返回 `receipt`（补偿凭据）、`rollback(receipt)`；

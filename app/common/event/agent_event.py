@@ -32,6 +32,10 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+class EventContractError(ValueError):
+    """事件 payload 不符合契约——这是**代码 bug**，不允许被 best-effort 逻辑吞掉。"""
+
+
 @dataclass(frozen=True)
 class AgentEvent:
     type: EventType
@@ -52,12 +56,14 @@ class AgentEvent:
         unexpected = set(self.payload) - allowed
         missing = required - set(self.payload)
         if unexpected:
-            raise ValueError(
+            raise EventContractError(
                 f"{event_type}: unexpected payload keys {sorted(unexpected)} "
                 f"(allowed: {sorted(allowed)})"
             )
         if missing:
-            raise ValueError(f"{event_type}: missing required payload keys {sorted(missing)}")
+            raise EventContractError(
+                f"{event_type}: missing required payload keys {sorted(missing)}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

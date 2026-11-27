@@ -9,7 +9,7 @@ C 交付 SQLite 实现时**只需要改这个文件里的一处**：把 ``_sqlit
 
 交付检查清单：
 1. 把 ``_sqlite_store`` 改成 ``return SqliteStateStore(db_path)``；
-2. 跑 ``uv run pytest tests/contracts -q``，59 条（memory + sqlite 各一遍）全绿；
+2. 跑 ``uv run pytest tests/contracts -q``，61 条（memory + sqlite 各一遍）全绿；
 3. 若有用例红：先看是契约读不懂，还是实现少了事务/幂等语义——**不要改测试来迁就实现**，
    改契约要先通知 A 并同步更新这份用例。
 """

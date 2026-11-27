@@ -1,5 +1,7 @@
 # Nano Codex 第一阶段移植记录
 
+> 历史记录：本文件描述的 pp/core/agent.py、pp/core/provider.py、pp/main.py 等原型执行链已在 PR2 删除，语义已移植到 pp/core/loop 与 pp/core/provider。
+
 ## 范围与来源
 
 以移植时的 `D:/Programs/Python/OOAD/Assignment1/agent.py` 为基准，尽量保留函数主体和循环顺序。

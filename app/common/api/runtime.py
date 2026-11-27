@@ -1,6 +1,6 @@
 # 过渡期遗留：nano-codex 原型的同步注入点。
-# 新代码一律从 app/common/api/ 的端口导入；本文件随 PR2 删除（届时 app/core/agent.py、
-# app/core/provider.py 一起重写），不要再往这里加东西。
+# 新代码一律从 app/common/api/ 的端口导入；本文件在 B 迁移到异步 ToolRegistry 后删除（
+# app/core/provider.py 已在 PR2 删除），不要再往这里加东西。
 # 来源：D:/Programs/Python/OOAD/Assignment1/agent.py 的 client/tools/functions/observer 注入点（245–338 行）。
 # 功能：将隐式约定提取为 Provider、工具执行、审批和事件接口，Core 不导入 Tools/State。
 # 后续：与团队统一异步、会话、持久化审批及 StateStore 接口；当前只支持同步单轮运行。

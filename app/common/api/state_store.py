@@ -138,7 +138,14 @@ class TurnStatus(StrEnum):
 
 TOOL_TRANSITIONS: dict[ToolCallStatus, frozenset[ToolCallStatus]] = {
     ToolCallStatus.PENDING: frozenset(
-        {ToolCallStatus.AWAITING_APPROVAL, ToolCallStatus.DISPATCHED, ToolCallStatus.DENIED}
+        {
+            ToolCallStatus.AWAITING_APPROVAL,
+            ToolCallStatus.DISPATCHED,
+            ToolCallStatus.DENIED,
+            # 执行前校验失败（坏 JSON / 未知工具）允许从 pending 直接落 failed：
+            # 这类失败没有外部副作用。success 仍然必须先 dispatched。
+            ToolCallStatus.FAILED,
+        }
     ),
     ToolCallStatus.AWAITING_APPROVAL: frozenset(
         {ToolCallStatus.APPROVED, ToolCallStatus.DENIED}
@@ -390,8 +397,10 @@ class StateStore(Protocol):
         """写 observation、``reversible``、追加 ``role="tool"`` 消息并置终态——同一事务。
 
         ``result.status`` 决定目标状态（success→completed / error→failed /
-        denied→denied）。``denied`` 允许从 ``pending`` 或 ``awaiting_approval`` 直接
-        转入（工具从未被派发）；``dispatched`` 不能改判为 ``denied``。
+        denied→denied）。`denied` 允许从 `pending` 或 `awaiting_approval` 直接转入
+        （工具从未被派发）；`error` 也允许从 `pending` 直接转 `failed`——那表示
+        执行前校验失败（坏 JSON、未知工具），没有任何外部副作用；
+        **`success` 必须先 `dispatched`**，而 `dispatched` 不能改判为 `denied`。
         observation 的持久化内容是 ``{"status", "result", "receipt"}`` 的 JSON，
         ``receipt`` 由 ``get_receipt`` 读回。
 
